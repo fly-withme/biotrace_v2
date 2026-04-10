@@ -1,0 +1,477 @@
+"""Post-session analysis view for BioTrace.
+
+Displays session statistics, a biometric timeline chart, and a video
+playback area for post-session review.
+"""
+
+from datetime import datetime
+
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtWidgets import (
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpacerItem,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from app.ui.theme import (
+    CARD_PADDING,
+    COLOR_BACKGROUND,
+    COLOR_BORDER,
+    COLOR_CARD,
+    COLOR_DANGER,
+    COLOR_DANGER_BG,
+    COLOR_FONT,
+    COLOR_FONT_MUTED,
+    COLOR_PRIMARY,
+    COLOR_PRIMARY_HOVER,
+    COLOR_PRIMARY_SUBTLE,
+    COLOR_SUCCESS,
+    COLOR_WARNING,
+    COLOR_WARNING_BG,
+    FONT_BODY,
+    FONT_CAPTION,
+    FONT_HEADING_1,
+    FONT_HEADING_2,
+    FONT_SMALL,
+    RADIUS_LG,
+    SPACE_1,
+    SPACE_2,
+    SPACE_3,
+    GRID_GUTTER,
+    CONTENT_PADDING_H,
+    CONTENT_PADDING_V,
+    CHART_HEIGHT_TIMELINE,
+    WEIGHT_BOLD,
+    WEIGHT_EXTRABOLD,
+    WEIGHT_SEMIBOLD,
+    get_icon,
+)
+from app.storage.database import DatabaseManager
+from app.storage.export import SessionExporter
+from app.storage.session_repository import SessionRepository
+from app.ui.widgets.video_player import VideoPlayer
+from app.ui.widgets.timeline_chart import TimelineChart
+from app.ui.widgets.donut_gauge import DonutGauge
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+CARD_TITLE_FONT_SIZE = FONT_HEADING_2 - 4
+
+
+class PostSessionView(QWidget):
+    """Individual session dashboard shown after a session ends or when opened from history.
+
+    Shows session date/title, three summary metric cards (performance, time,
+    error rate), a biometric timeline chart with series toggle, and a video
+    playback area.
+
+    User flow
+    ---------
+    LiveView END SESSION → MainWindow._on_session_ended →
+    ``load_session(session_id)`` is called → this view is shown.
+    """
+
+    back_to_dashboard = pyqtSignal()
+    session_renamed = pyqtSignal(int, str)
+
+    def __init__(
+        self,
+        db: DatabaseManager,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._db = db
+        self._session_id: int | None = None
+        self._exporter = SessionExporter(db)
+        self._session_repo = SessionRepository(db)
+        
+        self._perf_gauge: DonutGauge | None = None
+        self._time_gauge: DonutGauge | None = None
+        self._err_gauge: DonutGauge | None = None
+
+        self._timeline_chart = TimelineChart()
+        self._video_player = VideoPlayer()
+        
+        self._build_ui()
+        self._wire_signals()
+
+    def _wire_signals(self) -> None:
+        """Connect internal widget signals."""
+        self._timeline_chart.timestamp_clicked.connect(self._video_player.seek_to)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def _on_export_clicked(self) -> None:
+        """Open a save-file dialog and export the current session to Excel."""
+        if self._session_id is None:
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Session Data",
+            f"session_{self._session_id}.xlsx",
+            "Excel Workbook (*.xlsx)",
+        )
+        if not path:
+            return  # user cancelled
+
+        if not path.endswith(".xlsx"):
+            path += ".xlsx"
+
+        self._exporter.export_excel(self._session_id, path)
+        logger.info("Session %d exported by user to %s", self._session_id, path)
+
+    def load_session(self, session_id: int) -> None:
+        """Load session metadata and data into the dashboard.
+
+        Args:
+            session_id: The database ID of the session to display.
+        """
+        self._session_id = session_id
+
+        session = self._session_repo.get_session(session_id)
+        if session is None:
+            logger.warning("PostSessionView: session %d not found in DB.", session_id)
+            self._title_label.setText("Session —")
+            return
+
+        # ── Title: custom name OR actual session date ─────────────────
+        if session["name"]:
+            self._title_label.setText(session["name"])
+        else:
+            try:
+                started_at = datetime.fromisoformat(str(session["started_at"]))
+                self._title_label.setText(f"Session {started_at.strftime('%-d.%-m.%Y')}")
+            except Exception:
+                self._title_label.setText("Session —")
+
+        # ── TOTAL TIME card ────────────────────────────────────────────
+        try:
+            started_at = datetime.fromisoformat(str(session["started_at"]))
+            ended_at   = datetime.fromisoformat(str(session["ended_at"]))
+            total_s = int((ended_at - started_at).total_seconds())
+            m, s = divmod(total_s, 60)
+            if self._time_gauge:
+                self._time_gauge.set_value(1.0, f"{m}:{s:02d}")
+        except Exception:
+            if self._time_gauge:
+                self._time_gauge.set_value(0.0, "—")
+
+        # ── PERFORMANCE card ───────────────────────────────────────────
+        # Stub: will be wired to real score in Phase 7.
+        if self._perf_gauge:
+            self._perf_gauge.set_value(0.84, "84%")
+
+        # ── ERROR RATE card ────────────────────────────────────────────
+        err_count = session["error_count"]
+        if err_count is not None:
+            # Normalization stub for gauge: assume 0-10 errors range for now
+            val = min(1.0, float(err_count) / 10.0)
+            if self._err_gauge:
+                self._err_gauge.set_value(val, str(err_count))
+        else:
+            if self._err_gauge:
+                self._err_gauge.set_value(0.0, "—")
+
+        # ── Timeline Data ──────────────────────────────────────────────
+        self._timeline_chart.load_session(self._db, session_id)
+
+        # ── Video Recording ────────────────────────────────────────────
+        video_path = self._session_repo.get_video_path(session_id)
+        self._video_player.load(video_path)
+
+        logger.info("PostSessionView loaded session_id=%d", session_id)
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ── Header (Static at top) ─────────────────────────────────────
+        header_widget = QWidget()
+        header_widget.setStyleSheet(f"background: {COLOR_BACKGROUND};")
+        header_v = QVBoxLayout(header_widget)
+        header_v.setContentsMargins(CONTENT_PADDING_H, CONTENT_PADDING_V,
+                                    CONTENT_PADDING_H, SPACE_2)
+        header_v.addLayout(self._build_header())
+        outer.addWidget(header_widget)
+
+        # ── Scroll area for content ────────────────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        
+        content = QWidget()
+        content.setStyleSheet(f"background: {COLOR_BACKGROUND};")
+        content_layout = QVBoxLayout(content)
+        # Large margins and even larger vertical spacing for "breathing room"
+        content_layout.setContentsMargins(CONTENT_PADDING_H, SPACE_2,
+                                          CONTENT_PADDING_H, CONTENT_PADDING_V * 2)
+        content_layout.setSpacing(int(GRID_GUTTER * 1.5))
+
+        # Row 1: Summary Metric Cards
+        content_layout.addLayout(self._build_metric_cards())
+        
+        # Row 2: Session Analysis (Timeline Chart)
+        analysis_card = self._build_analysis_card()
+        # Ensure it has enough space in the scroll view
+        analysis_card.setMinimumHeight(420)
+        content_layout.addWidget(analysis_card)
+
+        # Row 3: Video Player
+        video_area = self._build_video_area()
+        video_area.setMinimumHeight(520) # Large playback area
+        content_layout.addWidget(video_area)
+
+        content_layout.addStretch(1)
+        
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+
+    def _build_header(self) -> QHBoxLayout:
+        """Build the header row: title + status indicators + export button."""
+        header = QHBoxLayout()
+        header.setSpacing(SPACE_2)
+
+        # Keep icon controls visually proportional to the shared heading size.
+        status_button_size = FONT_HEADING_2 * 2
+        status_icon_size = FONT_HEADING_2 - 8
+
+        # Container for the title and rename edit
+        title_container = QWidget()
+        title_layout = QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(SPACE_1)
+
+        self._title_label = QLabel("Session —")
+        self._title_label.setObjectName("heading")
+        title_layout.addWidget(self._title_label)
+
+        self._title_edit = QLineEdit()
+        self._title_edit.setObjectName("heading")
+        self._title_edit.setStyleSheet(
+            f"font-size: {FONT_HEADING_2}px; font-weight: {WEIGHT_BOLD};"
+        )
+        self._title_edit.setMinimumWidth(250)
+        self._title_edit.hide()
+        self._title_edit.returnPressed.connect(self._on_name_saved)
+        title_layout.addWidget(self._title_edit)
+
+        self._rename_btn = QToolButton()
+        self._rename_btn.setIcon(get_icon("ph.pencil-simple", color=COLOR_FONT_MUTED))
+        self._rename_btn.setIconSize(QSize(18, 18))
+        self._rename_btn.setFixedSize(32, 32)
+        self._rename_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rename_btn.setStyleSheet("background: transparent; border: none;")
+        self._rename_btn.clicked.connect(self._on_rename_clicked)
+        title_layout.addWidget(self._rename_btn)
+
+        header.addWidget(title_container)
+        header.addStretch(1)
+
+        # Export Button (Primary Action)
+        export_btn = QPushButton("Export Data ")
+        export_btn.setIcon(get_icon("ph.arrow-right", color="#FFFFFF"))
+        export_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        export_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
+        export_btn.setFixedHeight(FONT_HEADING_2 * 2)
+        export_btn.setMinimumWidth(170)
+        export_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {COLOR_PRIMARY};
+                color: #FFFFFF;
+                border: none;
+                border-radius: {FONT_HEADING_2}px;
+                padding: 0px {SPACE_2}px;
+                font-size: {FONT_BODY}px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {COLOR_PRIMARY_HOVER};
+            }}
+            QPushButton:pressed {{
+                background-color: {COLOR_PRIMARY};
+                padding-top: 1px;
+                padding-bottom: 0px;
+            }}
+            """
+        )
+        export_btn.clicked.connect(self._on_export_clicked)
+        header.addWidget(export_btn)
+
+        return header
+
+    def _on_rename_clicked(self) -> None:
+        """Switch title label to edit mode."""
+        self._title_label.hide()
+        self._rename_btn.hide()
+        self._title_edit.setText(self._title_label.text())
+        self._title_edit.show()
+        self._title_edit.setFocus()
+        self._title_edit.selectAll()
+
+    def _on_name_saved(self) -> None:
+        """Save the new session name and revert to label mode."""
+        new_name = self._title_edit.text().strip()
+        if self._session_id is not None and new_name:
+            self._session_repo.set_session_name(self._session_id, new_name)
+            self._title_label.setText(new_name)
+            self.session_renamed.emit(self._session_id, new_name)
+
+        self._title_edit.hide()
+        self._title_label.show()
+        self._rename_btn.show()
+
+    def _build_metric_cards(self) -> QHBoxLayout:
+        """Build the three summary metric cards (performance, total time, error rate)."""
+        row = QHBoxLayout()
+        row.setSpacing(GRID_GUTTER)
+
+        self._perf_gauge = self._add_metric_card(
+            row, "PERFORMANCE", COLOR_PRIMARY, COLOR_PRIMARY_SUBTLE
+        )
+        self._time_gauge = self._add_metric_card(
+            row, "TOTAL TIME", COLOR_WARNING, COLOR_WARNING_BG
+        )
+        self._err_gauge = self._add_metric_card(
+            row, "ERROR RATE", COLOR_DANGER, COLOR_DANGER_BG
+        )
+
+        return row
+
+    def _add_metric_card(
+        self,
+        layout: QHBoxLayout,
+        title: str,
+        accent: str,
+        track: str,
+    ) -> DonutGauge:
+        """Create one metric card matching Dashboard style and return the DonutGauge."""
+        card = QFrame()
+        card.setObjectName("card")
+        card.setStyleSheet(
+            f"QFrame#card {{ background-color: transparent; border: 1px solid {COLOR_BORDER};"
+            f" border-radius: {RADIUS_LG}px; }}"
+        )
+        card.setMinimumHeight(300)
+        
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(SPACE_3, SPACE_2, SPACE_3, SPACE_3)
+        card_layout.setSpacing(SPACE_1)
+
+        card_layout.addStretch(1)
+        gauge = DonutGauge(
+            value=0.0,
+            accent_color=accent,
+            track_color=track,
+            center_text="—",
+            half_circle=True
+        )
+        gauge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        card_layout.addWidget(gauge, alignment=Qt.AlignmentFlag.AlignHCenter)
+        card_layout.addStretch(1)
+
+        title_label = QLabel(title)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        title_label.setStyleSheet(
+            f"color: {COLOR_FONT}; font-size: {CARD_TITLE_FONT_SIZE}px; font-weight: 700;"
+        )
+        card_layout.addWidget(title_label)
+
+        layout.addWidget(card)
+        return gauge
+
+    def _build_analysis_card(self) -> QFrame:
+        """Build the session analysis card with series toggle buttons."""
+        card = QFrame()
+        card.setObjectName("card")
+        card.setStyleSheet("background-color: transparent;")
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        outer = QVBoxLayout(card)
+        outer.setContentsMargins(CARD_PADDING, CARD_PADDING, CARD_PADDING, CARD_PADDING)
+        outer.setSpacing(SPACE_2)
+
+        # ── Title + toggle row ─────────────────────────────────────
+        title_row = QHBoxLayout()
+
+        title_lbl = QLabel("SESSION ANALYSIS")
+        title_lbl.setStyleSheet(
+            f"color: {COLOR_FONT_MUTED}; font-size: {FONT_CAPTION}px;"
+            f" font-weight: {WEIGHT_BOLD}; letter-spacing: 1px;"
+        )
+        title_row.addWidget(title_lbl)
+
+        title_row.addSpacerItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        )
+
+        _toggle_base = (
+            f"border: 1px solid; border-radius: {RADIUS_LG}px;"
+            f" padding: 4px 12px; font-size: {FONT_SMALL}px; font-weight: {WEIGHT_SEMIBOLD};"
+        )
+        cog_btn = QPushButton(" COGNITIVE LOAD")
+        cog_btn.setIcon(get_icon("ph.brain-fill", color=COLOR_WARNING))
+        cog_btn.setCheckable(True)
+        cog_btn.setChecked(True)
+        cog_btn.setFixedHeight(30)
+        
+        def _update_cog_style(checked):
+            color = "#FFFFFF" if checked else COLOR_WARNING
+            bg = COLOR_WARNING if checked else "transparent"
+            cog_btn.setIcon(get_icon("ph.brain-fill", color=color))
+            cog_btn.setStyleSheet(
+                f"QPushButton {{ {_toggle_base} background: {bg}; color: {color}; border-color: {COLOR_WARNING}; }}"
+            )
+        
+        cog_btn.toggled.connect(_update_cog_style)
+        cog_btn.toggled.connect(lambda v: self._timeline_chart.set_series_visibility("WORKLOAD", v))
+        _update_cog_style(True)
+        title_row.addWidget(cog_btn)
+
+        hrv_btn = QPushButton(" STRESS (RMSSD)")
+        hrv_btn.setIcon(get_icon("ph.heartbeat-fill", color=COLOR_PRIMARY))
+        hrv_btn.setCheckable(True)
+        hrv_btn.setChecked(True)
+        hrv_btn.setFixedHeight(30)
+
+        def _update_hrv_style(checked):
+            color = "#FFFFFF" if checked else COLOR_PRIMARY
+            bg = COLOR_PRIMARY if checked else "transparent"
+            hrv_btn.setIcon(get_icon("ph.heartbeat-fill", color=color))
+            hrv_btn.setStyleSheet(
+                f"QPushButton {{ {_toggle_base} background: {bg}; color: {color}; border-color: {COLOR_PRIMARY}; }}"
+            )
+
+        hrv_btn.toggled.connect(_update_hrv_style)
+        hrv_btn.toggled.connect(lambda v: self._timeline_chart.set_series_visibility("STRESS", v))
+        _update_hrv_style(True)
+        title_row.addWidget(hrv_btn)
+
+        outer.addLayout(title_row)
+        self._timeline_chart.setMinimumHeight(CHART_HEIGHT_TIMELINE)
+        outer.addWidget(self._timeline_chart, stretch=1)
+
+        return card
+
+    def _build_video_area(self) -> QWidget:
+        """Return the video player widget."""
+        return self._video_player

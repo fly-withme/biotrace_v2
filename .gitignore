@@ -1,0 +1,4 @@
+recordings/
+biotrace.log
+.venv/
+**/__pycache__/
