@@ -46,6 +46,7 @@ class PupilProcessor(QObject):
         super().__init__(parent)
         self.baseline_px: float = baseline_px
         self._prev_diameter: float | None = None
+        self._sample_count: int = 0   # total accepted samples (for detection-rate log)
 
     def set_baseline(self, baseline_px: float) -> None:
         """Update the calibration baseline diameter.
@@ -83,12 +84,22 @@ class PupilProcessor(QObject):
 
         self._prev_diameter = diameter
 
+        self._sample_count += 1
+        if self._sample_count % 150 == 0:   # log every ~5 s at 30 fps
+            logger.info(
+                "PupilProcessor: %d samples accepted so far (baseline=%.2f px).",
+                self._sample_count, self.baseline_px,
+            )
+
         if self.baseline_px <= 0.0:
-            # Baseline not yet set (pre-calibration); skip PDI computation.
+            # No calibration baseline yet — emit raw diameter so the live view
+            # shows that the sensor is working.  The card unit is "px" so this
+            # is still meaningful to the user.
+            self.pdi_updated.emit(diameter, timestamp_s)
             return
 
         pdi = compute_pdi(diameter, self.baseline_px)
-        
+
         # Physiological outlier clamp: discard if change > 40 % from baseline.
         if abs(pdi) > PUPIL_PDI_OUTLIER_CLAMP:
             logger.debug("PDI outlier rejected: pdi=%.3f", pdi)
@@ -99,4 +110,5 @@ class PupilProcessor(QObject):
     def reset(self) -> None:
         """Clear state between sessions."""
         self._prev_diameter = None
+        self._sample_count = 0
         logger.info("PupilProcessor reset.")

@@ -216,6 +216,7 @@ class LiveView(QWidget):
         self._session_id: int | None = None
         self._recording_path: Path | None = None
         self._current_camera_index: int = CAMERA_INDEX
+        self._has_pupil_baseline: bool = False  # True once calibration sets a baseline
 
         self._clock_timer = QTimer(self)
         self._clock_timer.setInterval(1000)
@@ -259,6 +260,7 @@ class LiveView(QWidget):
         session_manager.bpm_updated.connect(self.on_bpm_updated)
         session_manager.hrv_connection_changed.connect(self._on_hrv_connection_changed)
         session_manager.eye_connection_changed.connect(self._on_eye_connection_changed)
+        session_manager.calibration_complete.connect(self._on_calibration_complete)
         session_manager.session_started.connect(self._on_session_started)
         session_manager.session_ended.connect(self._on_session_ended)
         session_manager.session_paused.connect(self._on_session_paused)
@@ -807,6 +809,7 @@ class LiveView(QWidget):
         logger.info("LiveView: session %d started.", session_id)
         self._session_id = session_id
         self._session_active = True
+        self._has_pupil_baseline = False  # reset — calibration may not have produced one
         self._reset_widgets()
         self._start_clock()
 
@@ -926,13 +929,30 @@ class LiveView(QWidget):
 
     @pyqtSlot(float, float)
     def on_pdi_updated(self, pdi: float, timestamp: float) -> None:
-        """Receive PDI update and refresh pupil dilation card.
+        """Receive PDI update (or raw diameter) and refresh pupil dilation card.
+
+        When a calibration baseline exists, ``pdi`` is the Pupil Dilation Index
+        (dimensionless) and is displayed scaled to a %-like index.
+        Before calibration, ``pdi`` carries the raw diameter in px so that the
+        live view shows sensor activity even without a baseline.
 
         Args:
-            pdi: Pupil Dilation Index (dimensionless ratio relative to baseline).
+            pdi: PDI ratio (with baseline) or raw diameter in px (without baseline).
             timestamp: Unix timestamp of the sample.
         """
-        self._pupil_card.set_value(pdi * 100.0, timestamp)  # display as %-like index
+        if self._has_pupil_baseline:
+            self._pupil_card.set_value(pdi * 100.0, timestamp)  # display as %-like index
+        else:
+            self._pupil_card.set_value(pdi, timestamp)  # raw diameter in px
+
+    @pyqtSlot(float, float)
+    def _on_calibration_complete(self, _baseline_rmssd: float, baseline_pupil_px: float) -> None:
+        """Record whether a valid pupil baseline was established."""
+        self._has_pupil_baseline = baseline_pupil_px > 0.0
+        logger.info(
+            "LiveView: calibration complete — pupil baseline %.2f px (has_baseline=%s).",
+            baseline_pupil_px, self._has_pupil_baseline,
+        )
 
     @pyqtSlot(float, float)
     def on_cli_updated(self, cli: float, timestamp: float) -> None:
