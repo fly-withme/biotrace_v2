@@ -217,6 +217,8 @@ class LiveView(QWidget):
         self._recording_path: Path | None = None
         self._current_camera_index: int = CAMERA_INDEX
         self._has_pupil_baseline: bool = False  # True once calibration sets a baseline
+        self._pdi_min_seen: float = float("inf")
+        self._pdi_max_seen: float = float("-inf")
 
         self._clock_timer = QTimer(self)
         self._clock_timer.setInterval(1000)
@@ -590,7 +592,7 @@ class LiveView(QWidget):
         self._pupil_card = MetricCard(
             name="PUPIL DILATION",
             unit="px",
-            decimals=2,
+            decimals=1,
         )
         self._bpm_card = MetricCard(
             name="HEART RATE",
@@ -810,6 +812,8 @@ class LiveView(QWidget):
         self._session_id = session_id
         self._session_active = True
         self._has_pupil_baseline = False  # reset — calibration may not have produced one
+        self._pdi_min_seen = float("inf")
+        self._pdi_max_seen = float("-inf")
         self._reset_widgets()
         self._start_clock()
 
@@ -944,6 +948,18 @@ class LiveView(QWidget):
             self._pupil_card.set_value(pdi * 100.0, timestamp)  # display as %-like index
         else:
             self._pupil_card.set_value(pdi, timestamp)  # raw diameter in px
+
+        # Track running min/max for workload normalization.
+        self._pdi_min_seen = min(self._pdi_min_seen, pdi)
+        self._pdi_max_seen = max(self._pdi_max_seen, pdi)
+
+        pdi_range = self._pdi_max_seen - self._pdi_min_seen
+        if pdi_range > 0.0:
+            workload = (pdi - self._pdi_min_seen) / pdi_range
+            workload_pct = workload * 100.0
+            self._workload_gauge.set_value(workload, f"{workload_pct:.0f}%")
+            self._cam_workload_gauge.set_value(workload, f"{workload_pct:.0f}%")
+            self._timeline_chart.append("WORKLOAD", timestamp, workload)
 
     @pyqtSlot(float, float)
     def _on_calibration_complete(self, _baseline_rmssd: float, baseline_pupil_px: float) -> None:
