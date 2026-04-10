@@ -373,7 +373,7 @@ class SessionManager(QObject):
             self._cal_repo.save_calibration(
                 session_id=self._session_id,
                 baseline_rmssd=self._baseline_rmssd,
-                baseline_pupil_mm=self._baseline_pupil_px,
+                baseline_pupil_px=self._baseline_pupil_px,
                 duration_seconds=self._cal_duration,
             )
 
