@@ -5,6 +5,7 @@ using the PuRe (Santini et al., 2018) algorithm, and emits raw diameter
 measurements in pixels.
 """
 
+import sys
 import time
 import cv2
 import numpy as np
@@ -35,7 +36,18 @@ class _PupilWorker(QThread):
         """Main detection loop."""
         cap = cv2.VideoCapture(self._camera_index)
         if not cap.isOpened():
-            msg = f"Eye tracker camera (index {self._camera_index}) not found."
+            if sys.platform == "darwin":
+                msg = (
+                    f"Eye tracker camera (index {self._camera_index}) could not be opened. "
+                    "On macOS this is usually a camera permission issue. "
+                    "Fix: System Settings → Privacy & Security → Camera → "
+                    "enable access for Terminal (or VS Code), then restart the app."
+                )
+            else:
+                msg = (
+                    f"Eye tracker camera (index {self._camera_index}) not found or could not be opened. "
+                    "Check that the USB eye tracker is connected and no other app is using it."
+                )
             logger.error(msg)
             self.connection_status_changed.emit(False, msg)
             return

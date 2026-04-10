@@ -29,9 +29,9 @@ def _configure() -> None:
     root = logging.getLogger("biotrace")
     root.setLevel(logging.DEBUG)
 
-    # Console handler — DEBUG and above.
+    # Console handler — INFO and above (DEBUG is too noisy for real-time use).
     ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.DEBUG)
+    ch.setLevel(logging.INFO)
     ch.setFormatter(_FORMATTER)
     root.addHandler(ch)
 
