@@ -7,16 +7,21 @@ Redesigned to match the BioTrace design system:
 - Single "Start" CTA → begins baseline recording
 - "Start Session" CTA on completion → emits ``proceed_to_live``
 - Back arrow (top-left) → emits ``close_requested``
+- Eye camera preview (bottom-right) → alignment guide + auto-start lock
 
 User flow
 ---------
 New Session (Dashboard header) → CalibrationView opens →
-user breathes, clicks Start → 60 s baseline records →
+EyeCameraPreview guides the user to align the eye tracker →
+green border + auto-start → 60 s baseline records →
 clicks "Start Session" → ``proceed_to_live`` → LiveView
 
 Dependency injection: call ``bind_session_manager()`` once after
 the view is added to the QStackedWidget.
 """
+
+import numpy as np
+import cv2
 
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -28,11 +33,13 @@ from PyQt6.QtCore import (
     pyqtProperty,
     pyqtSignal,
     pyqtSlot,
+    QThread,
 )
-from PyQt6.QtGui import QBrush, QColor, QPainter, QRadialGradient
+from PyQt6.QtGui import QBrush, QColor, QImage, QPainter, QPixmap, QRadialGradient
 from PyQt6.QtWidgets import (
     QDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -51,18 +58,24 @@ from app.ui.theme import (
     COLOR_PRIMARY,
     COLOR_PRIMARY_HOVER,
     COLOR_SUCCESS,
+    COLOR_WARNING,
     FONT_BODY,
     FONT_BODY_LARGE,
     FONT_CAPTION,
     FONT_SMALL,
     FONT_TITLE,
+    RADIUS_MD,
     SPACE_1,
     SPACE_2,
     SPACE_3,
     SPACE_4,
     get_icon,
 )
-from app.utils.config import CALIBRATION_DURATION_SECONDS
+from app.utils.config import (
+    CALIBRATION_DURATION_SECONDS,
+    EYE_TRACKER_CAMERA_INDEX,
+    USE_EYE_TRACKER,
+)
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -70,6 +83,10 @@ logger = get_logger(__name__)
 _INHALE_SECONDS: int = 4
 _EXHALE_SECONDS: int = 4
 
+
+# ---------------------------------------------------------------------------
+# CountdownRing
+# ---------------------------------------------------------------------------
 
 class CountdownRing(QWidget):
     """Compact circular countdown indicator used in calibration header."""
@@ -221,9 +238,6 @@ class BreathingOrb(QWidget):
         cy: float = self.height() / 2
         r: float = self._radius
 
-        # No extra background layers behind the orb to avoid visible artifacts while scaling.
-
-        # Sphere body. Preview mode uses a softer, flatter fill to avoid border-like edges.
         if self._preview_mode:
             sphere = QRadialGradient(QPointF(cx - r * 0.15, cy - r * 0.18), r * 1.35)
             sphere.setColorAt(0.00, QColor(178, 198, 238))
@@ -245,6 +259,310 @@ class BreathingOrb(QWidget):
             painter.drawEllipse(QPointF(cx, cy), r, r)
 
         painter.end()
+
+
+# ---------------------------------------------------------------------------
+# Eye Camera Preview — alignment guide widget
+# ---------------------------------------------------------------------------
+
+class _EyePreviewWorker(QThread):
+    """Background thread: captures frames from the eye tracker camera,
+    runs a simple pupil detector, and annotates each frame with a guide overlay.
+
+    Signals:
+        frame_ready (object): Emits an annotated BGR numpy array at ~30 fps.
+        quality_changed (str): Emits one of "none" | "far" | "close" | "good"
+            for each frame processed.
+        camera_unavailable (): Emitted once if the camera cannot be opened.
+    """
+
+    frame_ready         = pyqtSignal(object)  # annotated BGR numpy array
+    quality_changed     = pyqtSignal(str)
+    camera_unavailable  = pyqtSignal()
+
+    # Pupil diameter range (px) considered a good eye-to-camera distance.
+    _MIN_DIAMETER_PX: float = 20.0
+    _MAX_DIAMETER_PX: float = 100.0
+
+    def __init__(self, camera_index: int) -> None:
+        super().__init__()
+        self._camera_index = camera_index
+        self._running = True
+
+    def run(self) -> None:
+        """Capture loop: open camera, detect pupil, emit annotated frames."""
+        cap = cv2.VideoCapture(self._camera_index)
+        if not cap.isOpened():
+            logger.warning(
+                "EyePreviewWorker: camera index %d not available.", self._camera_index
+            )
+            self.camera_unavailable.emit()
+            return
+
+        logger.info("EyePreviewWorker started on camera %d.", self._camera_index)
+
+        while self._running:
+            ret, frame = cap.read()
+            if not ret:
+                logger.warning("EyePreviewWorker: failed to read frame.")
+                break
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            quality, cx, cy, diameter = self._detect_pupil(gray)
+            self._draw_guide(frame, gray.shape[0], gray.shape[1], quality, cx, cy, diameter)
+
+            self.quality_changed.emit(quality)
+            self.frame_ready.emit(frame.copy())
+            self.msleep(33)  # ~30 fps
+
+        cap.release()
+        logger.info("EyePreviewWorker stopped.")
+
+    def _detect_pupil(
+        self, gray: np.ndarray
+    ) -> tuple[str, float, float, float]:
+        """Detect the pupil in a grayscale frame using thresholding + moments.
+
+        Returns:
+            Tuple of (quality, center_x, center_y, diameter_px).
+            quality is "none" | "far" | "close" | "good".
+        """
+        blurred = cv2.GaussianBlur(gray, (9, 9), 0)
+        _, thresh = cv2.threshold(blurred, 45, 255, cv2.THRESH_BINARY_INV)
+        M = cv2.moments(thresh)
+
+        if M["m00"] < 50:
+            return "none", 0.0, 0.0, 0.0
+
+        cx = M["m10"] / M["m00"]
+        cy = M["m01"] / M["m00"]
+        diameter = 2.0 * float(np.sqrt(M["m00"] / np.pi))
+
+        if diameter < self._MIN_DIAMETER_PX:
+            return "far", cx, cy, diameter
+        if diameter > self._MAX_DIAMETER_PX:
+            return "close", cx, cy, diameter
+        return "good", cx, cy, diameter
+
+    def _draw_guide(
+        self,
+        frame: np.ndarray,
+        h: int,
+        w: int,
+        quality: str,
+        cx: float,
+        cy: float,
+        diameter: float,
+    ) -> None:
+        """Draw targeting circles and detected pupil onto the frame in-place."""
+        center = (w // 2, h // 2)
+        r_min = int(self._MIN_DIAMETER_PX / 2)
+        r_max = int(self._MAX_DIAMETER_PX / 2)
+
+        # Guide ring color based on quality
+        if quality == "good":
+            guide_rgb = (50, 200, 80)
+        elif quality in ("far", "close"):
+            guide_rgb = (50, 160, 255)
+        else:
+            guide_rgb = (140, 140, 160)
+
+        # Inner zone ring (minimum acceptable size)
+        cv2.circle(frame, center, r_min, guide_rgb, 1, cv2.LINE_AA)
+        # Outer zone ring (maximum acceptable size)
+        cv2.circle(frame, center, r_max, guide_rgb, 1, cv2.LINE_AA)
+        # Crosshair
+        cv2.line(frame, (center[0] - 12, center[1]), (center[0] + 12, center[1]), guide_rgb, 1)
+        cv2.line(frame, (center[0], center[1] - 12), (center[0], center[1] + 12), guide_rgb, 1)
+
+        # Detected pupil circle
+        if diameter > 0.0:
+            pupil_color = (50, 200, 80) if quality == "good" else (50, 160, 255)
+            cv2.circle(
+                frame,
+                (int(cx), int(cy)),
+                max(1, int(diameter / 2)),
+                pupil_color,
+                2,
+                cv2.LINE_AA,
+            )
+
+    def stop(self) -> None:
+        """Signal the capture loop to exit and wait for the thread."""
+        self._running = False
+        self.wait()
+
+
+class EyeCameraPreview(QFrame):
+    """Small eye-tracker camera preview with real-time alignment feedback.
+
+    Displays a live camera feed with a targeting overlay.  The border colour
+    and status label reflect the current alignment quality:
+
+    - Gray border  : no pupil detected
+    - Amber border : pupil detected but distance not ideal
+    - Green border : pupil in the correct zone (``eye_locked`` emitted)
+
+    Signals:
+        eye_locked ():       Emitted once when the pupil is stably detected
+                             in the ideal zone for ``_LOCK_FRAMES_REQUIRED``
+                             consecutive frames.
+        eye_unavailable ():  Emitted once if the camera cannot be opened
+                             (e.g. missing macOS permission).
+    """
+
+    eye_locked      = pyqtSignal()
+    eye_unavailable = pyqtSignal()
+
+    _PREVIEW_W:            int = 224
+    _PREVIEW_H:            int = 180
+    _VIDEO_W:              int = 214
+    _VIDEO_H:              int = 140
+    _LOCK_FRAMES_REQUIRED: int = 30   # ~1 s at 30 fps
+
+    def __init__(self, camera_index: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._camera_index = camera_index
+        self._worker: _EyePreviewWorker | None = None
+        self._lock_counter: int = 0
+        self._locked: bool = False
+
+        self.setFixedSize(self._PREVIEW_W, self._PREVIEW_H)
+        self.setObjectName("eye_preview_frame")
+        self._apply_border("neutral")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(3)
+
+        # Section title
+        title = QLabel("EYE ALIGNMENT")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(
+            f"color: {COLOR_FONT_MUTED}; font-size: 9px; font-weight: 700; "
+            "letter-spacing: 1.5px; background: transparent;"
+        )
+        layout.addWidget(title)
+
+        # Video frame label
+        self._video_lbl = QLabel()
+        self._video_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._video_lbl.setFixedSize(self._VIDEO_W, self._VIDEO_H)
+        self._video_lbl.setStyleSheet("background: #0D0D12; border-radius: 4px;")
+
+        # Placeholder eye icon shown before camera opens
+        placeholder_pixmap = get_icon("ph.eye", color=COLOR_FONT_MUTED).pixmap(32, 32)
+        self._video_lbl.setPixmap(placeholder_pixmap)
+        layout.addWidget(self._video_lbl, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # Status label
+        self._status_lbl = QLabel("Waiting for camera…")
+        self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status_lbl.setWordWrap(True)
+        self._status_lbl.setStyleSheet(
+            f"color: {COLOR_FONT_MUTED}; font-size: 9px; background: transparent;"
+        )
+        layout.addWidget(self._status_lbl)
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """Start the camera capture and alignment detection."""
+        if self._worker and self._worker.isRunning():
+            return
+        self._lock_counter = 0
+        self._locked = False
+        self._apply_border("neutral")
+        self._status_lbl.setText("Waiting for camera…")
+
+        self._worker = _EyePreviewWorker(self._camera_index)
+        self._worker.frame_ready.connect(self._on_frame)
+        self._worker.quality_changed.connect(self._on_quality)
+        self._worker.camera_unavailable.connect(self._on_camera_unavailable)
+        self._worker.start()
+
+    def stop(self) -> None:
+        """Stop the capture thread and release the camera."""
+        if self._worker:
+            self._worker.stop()
+            self._worker = None
+
+    # ── Private slots ─────────────────────────────────────────────────────
+
+    @pyqtSlot(object)
+    def _on_frame(self, frame: np.ndarray) -> None:
+        """Convert a BGR numpy array to QPixmap and display it."""
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg).scaled(
+            self._VIDEO_W,
+            self._VIDEO_H,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._video_lbl.setPixmap(pixmap)
+
+    @pyqtSlot(str)
+    def _on_quality(self, quality: str) -> None:
+        """Update border and status based on detection quality."""
+        if self._locked:
+            return  # already locked — keep green state
+
+        if quality == "none":
+            self._lock_counter = 0
+            self._apply_border("neutral")
+            self._status_lbl.setText("Position your eye in front of the camera")
+
+        elif quality == "far":
+            self._lock_counter = 0
+            self._apply_border("warning")
+            self._status_lbl.setText("Move closer to the camera")
+
+        elif quality == "close":
+            self._lock_counter = 0
+            self._apply_border("warning")
+            self._status_lbl.setText("Move slightly further from the camera")
+
+        elif quality == "good":
+            self._lock_counter += 1
+            progress = self._lock_counter / self._LOCK_FRAMES_REQUIRED
+            if progress < 1.0:
+                self._apply_border("acquiring")
+                self._status_lbl.setText(f"Hold still… {int(progress * 100)}%")
+            else:
+                self._locked = True
+                self._apply_border("locked")
+                self._status_lbl.setText("Eye aligned ✓  Starting…")
+                self.eye_locked.emit()
+
+    @pyqtSlot()
+    def _on_camera_unavailable(self) -> None:
+        """Handle the case where the camera could not be opened."""
+        self._apply_border("neutral")
+        self._status_lbl.setText(
+            "Camera unavailable.\n"
+            "Check macOS permissions:\n"
+            "System Settings → Privacy → Camera"
+        )
+        self.eye_unavailable.emit()
+
+    def _apply_border(self, state: str) -> None:
+        """Update the frame's border color to reflect alignment state."""
+        colors = {
+            "neutral":   COLOR_BORDER,
+            "warning":   COLOR_WARNING,
+            "acquiring": "#86EFAC",  # light green — nearly locked
+            "locked":    COLOR_SUCCESS,
+        }
+        border_color = colors.get(state, COLOR_BORDER)
+        self.setStyleSheet(
+            f"#eye_preview_frame {{"
+            f"  background: white;"
+            f"  border: 2px solid {border_color};"
+            f"  border-radius: {RADIUS_MD}px;"
+            f"}}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +609,12 @@ class CalibrationView(QWidget):
         self._prestart_remaining: int = 0
         self._prestart_active: bool = False
 
+        # Auto-start delay after eye alignment lock
+        self._eye_autostart_timer = QTimer(self)
+        self._eye_autostart_timer.setSingleShot(True)
+        self._eye_autostart_timer.setInterval(2000)
+        self._eye_autostart_timer.timeout.connect(self._auto_start_after_eye_lock)
+
         self._build_ui()
         self._orb.start_animation()
 
@@ -313,11 +637,18 @@ class CalibrationView(QWidget):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        # Root grid: allows the eye preview to float over the main content.
+        root_grid = QGridLayout(self)
+        root_grid.setContentsMargins(0, 0, 0, 0)
+        root_grid.setSpacing(0)
+
+        # ── Main content widget ──────────────────────────────────────────
+        main_widget = QWidget()
+        root = QVBoxLayout(main_widget)
         root.setContentsMargins(SPACE_3, SPACE_3, SPACE_3, SPACE_3)
         root.setSpacing(SPACE_2)
 
-        # ── Header (dashboard style) ───────────────────────────────────
+        # ── Header ──────────────────────────────────────────────────────
         header_row = QHBoxLayout()
         header_row.addStretch()
 
@@ -342,7 +673,9 @@ class CalibrationView(QWidget):
         header_row.addWidget(skip_btn)
 
         self._restart_btn = QPushButton()
-        self._restart_btn.setIcon(get_icon("ph.arrow-counter-clockwise-fill", color=COLOR_FONT_MUTED))
+        self._restart_btn.setIcon(
+            get_icon("ph.arrow-counter-clockwise-fill", color=COLOR_FONT_MUTED)
+        )
         self._restart_btn.setIconSize(QSize(16, 16))
         self._restart_btn.setFixedSize(36, 36)
         self._restart_btn.setToolTip("Restart calibration")
@@ -370,7 +703,7 @@ class CalibrationView(QWidget):
 
         root.addStretch(1)
 
-        # ── Centered content column ─────────────────────────────────────
+        # ── Centered content column ──────────────────────────────────────
         center_col = QVBoxLayout()
         center_col.setSpacing(0)
         center_col.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -414,6 +747,65 @@ class CalibrationView(QWidget):
 
         root.addLayout(center_col)
         root.addStretch(1)
+
+        root_grid.addWidget(main_widget, 0, 0)
+
+        # ── Eye camera preview overlay (bottom-right) ────────────────────
+        if USE_EYE_TRACKER:
+            # Wrapper adds bottom-right padding so the panel isn't flush to edge.
+            preview_wrapper = QWidget()
+            preview_wrapper.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+            pw_layout = QVBoxLayout(preview_wrapper)
+            pw_layout.setContentsMargins(0, 0, SPACE_3, SPACE_3)
+            pw_layout.setSpacing(0)
+
+            self._eye_preview = EyeCameraPreview(EYE_TRACKER_CAMERA_INDEX)
+            self._eye_preview.eye_locked.connect(self._on_eye_locked)
+            self._eye_preview.eye_unavailable.connect(self._on_eye_cam_unavailable)
+            pw_layout.addWidget(self._eye_preview)
+
+            root_grid.addWidget(
+                preview_wrapper, 0, 0,
+                Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight,
+            )
+
+            # Start button is locked until eye is aligned (or camera unavailable).
+            self._cta_btn.setEnabled(False)
+            self._status_label.setText("Align your eye with the camera to begin")
+        else:
+            self._eye_preview = None
+
+    # ------------------------------------------------------------------
+    # Eye alignment slots
+    # ------------------------------------------------------------------
+
+    @pyqtSlot()
+    def _on_eye_locked(self) -> None:
+        """Called when the eye preview confirms good alignment for ~1 s."""
+        self._cta_btn.setEnabled(True)
+        # Auto-start the breathing calibration after 2 s — user can also
+        # click Start manually within that window.
+        self._eye_autostart_timer.start()
+        logger.info("Eye alignment locked — auto-start in 2 s.")
+
+    @pyqtSlot()
+    def _auto_start_after_eye_lock(self) -> None:
+        """Trigger breathing calibration automatically after eye alignment."""
+        if not self._recording and not self._prestart_active and not self._complete:
+            self._start_prestart_countdown()
+
+    @pyqtSlot()
+    def _on_eye_cam_unavailable(self) -> None:
+        """If the camera cannot open, unblock the Start button anyway."""
+        self._cta_btn.setEnabled(True)
+        self._status_label.setText(
+            "Camera unavailable — grant permission in System Settings → Privacy → Camera"
+        )
+        logger.warning("Eye camera unavailable; Start button unblocked.")
+
+    # ------------------------------------------------------------------
+    # Baseline popup
+    # ------------------------------------------------------------------
 
     def _format_baseline_value_lines(self) -> tuple[str, str]:
         """Return two formatted baseline value lines without dummy values."""
@@ -513,14 +905,17 @@ class CalibrationView(QWidget):
         )
 
     # ------------------------------------------------------------------
-    # Close
+    # Close / skip
     # ------------------------------------------------------------------
 
     def _on_skip_calibration(self) -> None:
         """Skip calibration and proceed directly to live session."""
+        self._eye_autostart_timer.stop()
         self._prestart_timer.stop()
         self._prestart_active = False
         self._countdown_timer.stop()
+        if self._eye_preview:
+            self._eye_preview.stop()
 
         if self._session_manager is not None and self._recording:
             elapsed = CALIBRATION_DURATION_SECONDS - self._baseline_remaining
@@ -539,11 +934,13 @@ class CalibrationView(QWidget):
 
     def _on_close(self) -> None:
         """Stop all timers and emit close_requested → back to Dashboard."""
+        self._eye_autostart_timer.stop()
         self._prestart_timer.stop()
         self._prestart_active = False
         self._countdown_timer.stop()
+        if self._eye_preview:
+            self._eye_preview.stop()
         if self._session_manager and self._recording:
-            # Abort calibration gracefully.
             try:
                 self._session_manager.end_calibration(
                     duration_seconds=CALIBRATION_DURATION_SECONDS - self._baseline_remaining
@@ -558,11 +955,11 @@ class CalibrationView(QWidget):
 
     def _on_cta_clicked(self) -> None:
         if self._complete:
-            # Proceed to live view.
             self.proceed_to_live.emit()
         else:
             if self._recording or self._prestart_active:
                 return
+            self._eye_autostart_timer.stop()
             self._start_prestart_countdown()
 
     def _start_prestart_countdown(self) -> None:
@@ -602,7 +999,10 @@ class CalibrationView(QWidget):
         self._orb.set_preview_mode(False)
         self._orb.restart_from_inhale()
 
-        # During active recording the main CTA is hidden; only header restart is available.
+        # Stop the preview camera — the eye tracker itself will take over.
+        if self._eye_preview:
+            self._eye_preview.stop()
+
         self._cta_btn.hide()
         self._status_label.setText("")
 
@@ -697,6 +1097,7 @@ class CalibrationView(QWidget):
 
     def reset(self) -> None:
         """Return to initial state for a fresh calibration run."""
+        self._eye_autostart_timer.stop()
         self._prestart_timer.stop()
         self._prestart_active = False
         self._countdown_timer.stop()
@@ -710,13 +1111,20 @@ class CalibrationView(QWidget):
         self._countdown_ring.hide()
         self._countdown_ring.set_progress(1.0)
         self._breath_label.setText("Press Start")
-        self._status_label.setText("")
         self._cta_btn.show()
         self._cta_btn.setText("  Start")
         self._cta_btn.setIcon(get_icon("ph.play-fill", color="#FFFFFF"))
-        self._cta_btn.setEnabled(True)
         self._apply_cta_style_start()
         logger.debug("CalibrationView reset.")
+
+        if self._eye_preview:
+            # Re-enable Start lock and restart the preview camera.
+            self._cta_btn.setEnabled(False)
+            self._status_label.setText("Align your eye with the camera to begin")
+            self._eye_preview.start()
+        else:
+            self._cta_btn.setEnabled(True)
+            self._status_label.setText("")
 
     def _on_orb_phase_changed(self, phase: str) -> None:
         """Update breath guidance text to match orb animation phase."""

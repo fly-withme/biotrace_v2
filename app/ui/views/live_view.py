@@ -817,12 +817,11 @@ class LiveView(QWidget):
         self._reset_widgets()
         self._start_clock()
 
-        # Always start camera recording for the session, regardless of mode.
+        # Always start the feed first (feed must be active before recording can begin),
+        # then start recording — the camera runs in the background regardless of which
+        # display mode (Biofeedback vs Camera+Bio) is currently selected.
+        self._video_feed.start(camera_index=self._current_camera_index)
         self._start_camera_recording()
-
-        is_cam_active = self._mode_stack.currentIndex() == _MODE_CAMERA
-        if is_cam_active:
-            self._video_feed.start(camera_index=self._current_camera_index)
 
     @pyqtSlot(int)
     def _on_session_ended(self, session_id: int) -> None:
@@ -878,14 +877,9 @@ class LiveView(QWidget):
         # Update toolbar colors for the new mode
         self._update_toolbar_theme(is_video=(index == _MODE_CAMERA))
 
-        # Manage camera feed based on active mode and session state.
-        if self._session_active:
-            if index == _MODE_CAMERA:
-                self._video_feed.start(camera_index=self._current_camera_index)
-                self._start_camera_recording()
-            else:
-                self._stop_camera_recording()
-                self._video_feed.stop()
+        # The camera feed and recording run continuously for the whole session
+        # regardless of display mode.  Only the *display panel* switches here —
+        # never touch the feed or recording lifecycle on a mode switch.
 
         logger.info(
             "Live view mode: %s",
@@ -900,8 +894,8 @@ class LiveView(QWidget):
         """
         self._current_camera_index = 2 if self._current_camera_index == 1 else 1
 
-        if self._session_active and self._mode_stack.currentIndex() == _MODE_CAMERA:
-            # Re-start with new index.
+        if self._session_active:
+            # Re-start feed and recording on new camera index (feed always runs during session).
             self._stop_camera_recording()
             self._video_feed.start(camera_index=self._current_camera_index)
             self._start_camera_recording()
