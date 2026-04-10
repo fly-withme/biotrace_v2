@@ -258,6 +258,7 @@ class LiveView(QWidget):
         session_manager.cli_updated.connect(self.on_cli_updated)
         session_manager.bpm_updated.connect(self.on_bpm_updated)
         session_manager.hrv_connection_changed.connect(self._on_hrv_connection_changed)
+        session_manager.eye_connection_changed.connect(self._on_eye_connection_changed)
         session_manager.session_started.connect(self._on_session_started)
         session_manager.session_ended.connect(self._on_session_ended)
         session_manager.session_paused.connect(self._on_session_paused)
@@ -301,7 +302,7 @@ class LiveView(QWidget):
         row.setContentsMargins(SPACE_3, 0, SPACE_3, 0)
         row.setSpacing(SPACE_2)
 
-        # ── Left: title ────────────────────────────────────────
+        # ── Left: title + sensor status badges ────────────────────────────
         self._live_label = QLabel("LIVE SESSION")
         self._live_label.setStyleSheet(
             f"font-size: {FONT_SMALL}px; font-weight: 700; letter-spacing: 1.5px;"
@@ -309,6 +310,14 @@ class LiveView(QWidget):
         row.addWidget(self._live_label)
 
         row.addSpacing(SPACE_2)
+
+        self._ecg_badge = self._make_status_badge("ph.heartbeat-fill")
+        row.addWidget(self._ecg_badge)
+
+        self._eye_badge = self._make_status_badge("ph.eye-fill")
+        row.addWidget(self._eye_badge)
+
+        row.addSpacing(SPACE_1)
 
         row.addSpacerItem(
             QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
@@ -952,13 +961,21 @@ class LiveView(QWidget):
 
     @pyqtSlot(bool, str)
     def _on_hrv_connection_changed(self, connected: bool, _message: str) -> None:
-        """Clear stale heart-rate related values on disconnect."""
+        """Update ECG badge and clear stale heart-rate values on disconnect."""
+        self._set_badge_status(self._ecg_badge, "ph.heartbeat-fill", connected)
         if not connected:
             self._bpm_card.reset()
             self._rmssd_card.reset()
             self._stress_gauge.set_value(0.0, "—")
             self._cam_stress_gauge.set_value(0.0, "—")
             self._cam_bpm_lbl.setText("—")
+
+    @pyqtSlot(bool, str)
+    def _on_eye_connection_changed(self, connected: bool, _message: str) -> None:
+        """Update eye tracker badge and clear stale pupil values on disconnect."""
+        self._set_badge_status(self._eye_badge, "ph.eye-fill", connected)
+        if not connected:
+            self._pupil_card.reset()
 
     # ------------------------------------------------------------------
     # Widget reset
