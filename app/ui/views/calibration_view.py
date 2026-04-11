@@ -271,7 +271,7 @@ class _EyePreviewWorker(QThread):
 
     Signals:
         frame_ready (object): Emits an annotated BGR numpy array at ~30 fps.
-        quality_changed (str): Emits one of "none" | "far" | "close" | "good"
+        quality_changed (str): Emits one of "none" | "offcenter" | "good"
             for each frame processed.
         camera_unavailable (): Emitted once if the camera cannot be opened.
     """
@@ -280,9 +280,18 @@ class _EyePreviewWorker(QThread):
     quality_changed     = pyqtSignal(str)
     camera_unavailable  = pyqtSignal()
 
-    # Pupil diameter range (px) considered a good eye-to-camera distance.
-    _MIN_DIAMETER_PX: float = 20.0
-    _MAX_DIAMETER_PX: float = 100.0
+    # Absolute minimum blob area (m00 moment) to consider as a potential pupil.
+    # Kept intentionally low — Otsu thresholding handles the hard work.
+    _MIN_BLOB_AREA: float = 30.0
+
+    # Acceptable diameter range (px) — deliberately wide because the actual size
+    # depends on camera resolution and distance, which vary across setups.
+    _MIN_DIAMETER_PX: float = 8.0
+    _MAX_DIAMETER_PX: float = 400.0
+
+    # Pupil centre must fall within this fraction of the frame dimensions
+    # to be accepted as "good".  0.60 = central 60 % of each axis.
+    _CENTER_ZONE: float = 0.60
 
     def __init__(self, camera_index: int) -> None:
         super().__init__()
@@ -321,27 +330,42 @@ class _EyePreviewWorker(QThread):
     def _detect_pupil(
         self, gray: np.ndarray
     ) -> tuple[str, float, float, float]:
-        """Detect the pupil in a grayscale frame using thresholding + moments.
+        """Detect the pupil in a grayscale frame using Otsu thresholding + moments.
+
+        Uses Otsu's method so the threshold adapts automatically to the ambient
+        lighting and IR intensity of the specific eye-tracker camera in use.
+        Quality is determined by whether the detected blob is roughly centred in
+        the frame, not by its absolute pixel diameter (which depends on the
+        camera–eye distance and resolution).
 
         Returns:
             Tuple of (quality, center_x, center_y, diameter_px).
-            quality is "none" | "far" | "close" | "good".
+            quality is "none" | "offcenter" | "good".
         """
+        h, w = gray.shape
         blurred = cv2.GaussianBlur(gray, (9, 9), 0)
-        _, thresh = cv2.threshold(blurred, 45, 255, cv2.THRESH_BINARY_INV)
+
+        # Otsu threshold — inverted so the dark pupil becomes foreground.
+        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
         M = cv2.moments(thresh)
 
-        if M["m00"] < 50:
+        if M["m00"] < self._MIN_BLOB_AREA:
             return "none", 0.0, 0.0, 0.0
 
         cx = M["m10"] / M["m00"]
         cy = M["m01"] / M["m00"]
         diameter = 2.0 * float(np.sqrt(M["m00"] / np.pi))
 
-        if diameter < self._MIN_DIAMETER_PX:
-            return "far", cx, cy, diameter
-        if diameter > self._MAX_DIAMETER_PX:
-            return "close", cx, cy, diameter
+        if diameter < self._MIN_DIAMETER_PX or diameter > self._MAX_DIAMETER_PX:
+            return "none", cx, cy, diameter
+
+        # Check that the pupil centre is in the central zone of the frame.
+        margin_x = w * (1.0 - self._CENTER_ZONE) / 2.0
+        margin_y = h * (1.0 - self._CENTER_ZONE) / 2.0
+        if (cx < margin_x or cx > w - margin_x or
+                cy < margin_y or cy > h - margin_y):
+            return "offcenter", cx, cy, diameter
+
         return "good", cx, cy, diameter
 
     def _draw_guide(
@@ -354,26 +378,28 @@ class _EyePreviewWorker(QThread):
         cy: float,
         diameter: float,
     ) -> None:
-        """Draw targeting circles and detected pupil onto the frame in-place."""
-        center = (w // 2, h // 2)
-        r_min = int(self._MIN_DIAMETER_PX / 2)
-        r_max = int(self._MAX_DIAMETER_PX / 2)
+        """Draw targeting overlay and detected pupil onto the frame in-place.
 
-        # Guide ring color based on quality
+        The guide ring is proportional to the frame dimensions so it renders
+        correctly regardless of camera resolution or eye-to-camera distance.
+        """
+        center = (w // 2, h // 2)
+
+        # Guide ring radius: 20 % of the shorter frame edge.
+        guide_r = max(8, int(min(h, w) * 0.20))
+        # Crosshair arm length: 4 % of shorter edge.
+        arm = max(6, int(min(h, w) * 0.04))
+
         if quality == "good":
             guide_rgb = (50, 200, 80)
-        elif quality in ("far", "close"):
+        elif quality == "offcenter":
             guide_rgb = (50, 160, 255)
         else:
             guide_rgb = (140, 140, 160)
 
-        # Inner zone ring (minimum acceptable size)
-        cv2.circle(frame, center, r_min, guide_rgb, 1, cv2.LINE_AA)
-        # Outer zone ring (maximum acceptable size)
-        cv2.circle(frame, center, r_max, guide_rgb, 1, cv2.LINE_AA)
-        # Crosshair
-        cv2.line(frame, (center[0] - 12, center[1]), (center[0] + 12, center[1]), guide_rgb, 1)
-        cv2.line(frame, (center[0], center[1] - 12), (center[0], center[1] + 12), guide_rgb, 1)
+        cv2.circle(frame, center, guide_r, guide_rgb, 1, cv2.LINE_AA)
+        cv2.line(frame, (center[0] - arm, center[1]), (center[0] + arm, center[1]), guide_rgb, 1)
+        cv2.line(frame, (center[0], center[1] - arm), (center[0], center[1] + arm), guide_rgb, 1)
 
         # Detected pupil circle
         if diameter > 0.0:
@@ -418,7 +444,7 @@ class EyeCameraPreview(QFrame):
     _PREVIEW_H:            int = 180
     _VIDEO_W:              int = 214
     _VIDEO_H:              int = 140
-    _LOCK_FRAMES_REQUIRED: int = 30   # ~1 s at 30 fps
+    _LOCK_FRAMES_REQUIRED: int = 15   # ~0.5 s at 30 fps — faster lock for smoother UX
 
     def __init__(self, camera_index: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -514,15 +540,10 @@ class EyeCameraPreview(QFrame):
             self._apply_border("neutral")
             self._status_lbl.setText("Position your eye in front of the camera")
 
-        elif quality == "far":
+        elif quality == "offcenter":
             self._lock_counter = 0
             self._apply_border("warning")
-            self._status_lbl.setText("Move closer to the camera")
-
-        elif quality == "close":
-            self._lock_counter = 0
-            self._apply_border("warning")
-            self._status_lbl.setText("Move slightly further from the camera")
+            self._status_lbl.setText("Centre your eye in the frame")
 
         elif quality == "good":
             self._lock_counter += 1
@@ -967,15 +988,15 @@ class CalibrationView(QWidget):
         self._prestart_active = True
         self._prestart_remaining = 3
         self._cta_btn.setEnabled(False)
-        self._breath_label.setText(f"Calibration starting in {self._prestart_remaining}")
-        self._status_label.setText("")
+        self._breath_label.setText(f"Starting in {self._prestart_remaining}…")
+        self._status_label.setText("Relax and prepare to breathe with the orb")
         self._prestart_timer.start()
 
     def _tick_prestart_countdown(self) -> None:
         """Advance the pre-start countdown every second."""
         self._prestart_remaining -= 1
         if self._prestart_remaining > 0:
-            self._breath_label.setText(f"Calibration starting in {self._prestart_remaining}")
+            self._breath_label.setText(f"Starting in {self._prestart_remaining}…")
             return
 
         self._prestart_timer.stop()
@@ -1004,7 +1025,10 @@ class CalibrationView(QWidget):
             self._eye_preview.stop()
 
         self._cta_btn.hide()
-        self._status_label.setText("")
+        self._breath_label.setText("Breathe in…")
+        self._status_label.setText(
+            f"Recording baseline — {CALIBRATION_DURATION_SECONDS} s remaining"
+        )
 
         if self._session_manager is not None:
             self._session_manager.start_calibration()
@@ -1038,7 +1062,9 @@ class CalibrationView(QWidget):
         progress = self._baseline_remaining / CALIBRATION_DURATION_SECONDS
         self._countdown_ring.set_progress(progress)
         if self._baseline_remaining > 0:
-            self._status_label.setText("")
+            self._status_label.setText(
+                f"Recording baseline — {self._baseline_remaining} s remaining"
+            )
         else:
             self._countdown_timer.stop()
             self._finish_baseline()
@@ -1127,11 +1153,15 @@ class CalibrationView(QWidget):
             self._status_label.setText("")
 
     def _on_orb_phase_changed(self, phase: str) -> None:
-        """Update breath guidance text to match orb animation phase."""
-        if not self._recording:
+        """Update breath guidance text to match orb animation phase.
+
+        Runs during both the pre-start countdown and the active recording so
+        users can start syncing their breathing before the baseline begins.
+        """
+        if not self._recording and not self._prestart_active:
             return
 
         if phase == "inhale":
-            self._breath_label.setText("Breath in")
+            self._breath_label.setText("Breathe in…")
         elif phase == "exhale":
-            self._breath_label.setText("Breath out")
+            self._breath_label.setText("Breathe out…")

@@ -217,20 +217,8 @@ class _FlowchartCanvas(QWidget):
                 painter.drawLine(x2, cy1, x2 - a, cy1 - a)
                 painter.drawLine(x2, cy1, x2 - a, cy1 + a)
 
-        # 2. Node backgrounds + icons
+        # 2. Node icons (centered, no background)
         for i, (cx, cy) in enumerate(centers):
-            nd = self._nodes[i]
-            is_warn = nd.is_threshold
-            bg_color = COLOR_WARNING_BG if is_warn else COLOR_PRIMARY_SUBTLE
-
-            painter.setPen(QPen(QColor(COLOR_BORDER), 1))
-            painter.setBrush(QBrush(QColor(bg_color)))
-            painter.drawRoundedRect(
-                QRect(cx - half, cy - half, _NODE_SIZE, _NODE_SIZE),
-                RADIUS_MD,
-                RADIUS_MD,
-            )
-
             pm = self._pixmaps[i]
             painter.drawPixmap(cx - pm.width() // 2, cy - pm.height() // 2, pm)
 
@@ -402,6 +390,10 @@ class FlowchartCard(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("card")
+        self.setStyleSheet(
+            f"QFrame#card {{ background-color: transparent; border: 1px solid {COLOR_BORDER}; "
+            f"border-radius: {RADIUS_MD}px; }}"
+        )
         self._nodes = nodes
         self._active_index = -1
 

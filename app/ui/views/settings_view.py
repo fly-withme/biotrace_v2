@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 from app.storage.database import DatabaseManager
 from app.ui.theme import (
     CARD_PADDING,
+    COLOR_BORDER,
     COLOR_DANGER,
     COLOR_DANGER_BG,
     COLOR_SUCCESS,
@@ -33,6 +34,7 @@ from app.ui.theme import (
     FONT_SMALL,
     GRID_GUTTER,
     ICON_SIZE_DEFAULT,
+    RADIUS_LG,
     RADIUS_MD,
     SPACE_1,
     SPACE_2,
@@ -229,6 +231,10 @@ class _DataManagementCard(QFrame):
     def __init__(self, db: DatabaseManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("card")
+        self.setStyleSheet(
+            f"QFrame#card {{ background-color: transparent; border: 1px solid {COLOR_BORDER}; "
+            f"border-radius: {RADIUS_LG}px; }}"
+        )
         self._db = db
         self._export_worker: _ExportWorker | None = None
 
@@ -238,7 +244,7 @@ class _DataManagementCard(QFrame):
 
         # ── Heading ──────────────────────────────────────────────────
         heading = QLabel("Data Management")
-        heading.setObjectName("subheading")
+        heading.setObjectName("heading")
         layout.addWidget(heading)
 
         # ── Export row ───────────────────────────────────────────────
@@ -450,7 +456,7 @@ class SettingsView(QWidget):
 
         # ── How It Works section ─────────────────────────────────────
         how_heading = QLabel("Scientific Methodology")
-        how_heading.setObjectName("subheading")
+        how_heading.setObjectName("heading")
         layout.addWidget(how_heading)
 
         how_sub = QLabel(

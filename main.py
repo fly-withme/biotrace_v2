@@ -4,7 +4,34 @@ Run this file to start the BioTrace desktop application:
     python main.py
 """
 
+import os
 import sys
+
+# --- Virtual Environment Auto-Activation ---
+def _ensure_venv() -> None:
+    """If not running in a venv, try to re-run with the local .venv python."""
+    # Check if we are already in a virtual environment
+    in_venv = sys.prefix != sys.base_prefix or hasattr(sys, "real_prefix")
+    if in_venv:
+        return
+
+    # Look for .venv in the same directory as this script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    venv_dir = os.path.join(script_dir, ".venv")
+
+    if os.path.isdir(venv_dir):
+        # Determine python executable path (Windows vs macOS/Linux)
+        if os.name == "nt":
+            python_exe = os.path.join(venv_dir, "Scripts", "python.exe")
+        else:
+            python_exe = os.path.join(venv_dir, "bin", "python")
+
+        if os.path.isfile(python_exe):
+            # Re-execute the current script using the venv python
+            os.execv(python_exe, [python_exe] + sys.argv)
+
+_ensure_venv()
+# -------------------------------------------
 
 import signal
 

@@ -117,12 +117,13 @@ class ExcelImportView(QWidget):
         # Compact Drop Zone / Import Button
         self._drop_zone = QPushButton(" Click or Drop Excel File")
         self._drop_zone.setIcon(get_icon("ph.file-arrow-up", color=COLOR_PRIMARY))
-        self._drop_zone.setIconSize(QSize(20, 20))
-        self._drop_zone.setFixedHeight(50)
+        self._drop_zone.setIconSize(QSize(24, 24))
+        self._drop_zone.setFixedHeight(112)
+        self._drop_zone.setMaximumWidth(720)
         self._drop_zone.setStyleSheet(
             f"QPushButton {{ background-color: transparent; color: {COLOR_PRIMARY}; "
             f"border: 2px dashed {COLOR_BORDER}; border-radius: {RADIUS_LG}px; "
-            f"font-size: {FONT_BODY}px; font-weight: 600; padding: 0 20px; }}"
+            f"font-size: {FONT_BODY}px; font-weight: 600; padding: 0 24px; }}"
             f"QPushButton:hover {{ background-color: {COLOR_PRIMARY_SUBTLE}; border-color: {COLOR_PRIMARY}; }}"
         )
         self._drop_zone.clicked.connect(self._on_browse_clicked)
@@ -171,13 +172,14 @@ class ExcelImportView(QWidget):
         body_layout.addWidget(self._info_panel)
 
         # 2. Main Analysis Area
-        analysis_card = QFrame()
-        analysis_card.setObjectName("card")
-        analysis_card.setStyleSheet(
+        self._analysis_card = QFrame()
+        self._analysis_card.setObjectName("card")
+        self._analysis_card.setStyleSheet(
             f"QFrame#card {{ background-color: transparent; border: 1px solid {COLOR_BORDER};"
             f" border-radius: {RADIUS_LG}px; }}"
         )
-        analysis_layout = QVBoxLayout(analysis_card)
+        self._analysis_card.setVisible(False)
+        analysis_layout = QVBoxLayout(self._analysis_card)
         analysis_layout.setContentsMargins(SPACE_3, SPACE_3, SPACE_3, SPACE_3)
         
         self._chart = LearningCurveChart(show_position_marker=False, transparent=True)
@@ -188,31 +190,20 @@ class ExcelImportView(QWidget):
         self._stats_lbl.setStyleSheet(f"color: {COLOR_FONT_MUTED}; font-size: {FONT_SMALL}px;")
         analysis_layout.addWidget(self._stats_lbl)
         
-        body_layout.addWidget(analysis_card, stretch=1)
+        body_layout.addWidget(self._analysis_card, stretch=1)
         outer.addWidget(body)
 
     def _build_header(self) -> QHBoxLayout:
-        """Create the top row with title, status icons and back button."""
+        """Create the top row with the page title."""
         header = QHBoxLayout()
         header.setSpacing(SPACE_2)
 
-        title = QLabel("Import Performance Data")
+        title = QLabel("Import")
         title.setObjectName("heading")
+        title.setFixedHeight(FONT_HEADING_2 * 2)
+        title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header.addWidget(title)
         header.addStretch(1)
-
-        back_btn = QPushButton("Back to Dashboard")
-        back_btn.setIcon(get_icon("ph.arrow-left", color="#FFFFFF"))
-        back_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
-        back_btn.setFixedHeight(FONT_HEADING_2 * 2)
-        back_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {COLOR_PRIMARY}; color: #FFFFFF; border: none; "
-            f"border-radius: {FONT_HEADING_2}px; padding: 0px {SPACE_2}px; "
-            f"font-size: {FONT_BODY}px; font-weight: 600; }}"
-            f"QPushButton:hover {{ background-color: {COLOR_PRIMARY_HOVER}; }}"
-        )
-        back_btn.clicked.connect(self.close_requested.emit)
-        header.addWidget(back_btn)
         return header
 
     def _make_card(self, title_text: str) -> QFrame:
@@ -268,6 +259,7 @@ class ExcelImportView(QWidget):
         self._info_panel.setVisible(False)
         self._exercise_card.setVisible(False)
         self._participant_card.setVisible(False)
+        self._analysis_card.setVisible(False)
 
         sheets = self._parser.list_sheets(path)
         if not sheets:
@@ -369,6 +361,7 @@ class ExcelImportView(QWidget):
         self._drop_zone.setText(" Click or Drop Excel File")
         self._current_fit = fit
         
+        self._analysis_card.setVisible(True)
         self._chart.update_data(data_points, fit, metric_label=metric, y_axis_inverted=True)
         
         if fit:

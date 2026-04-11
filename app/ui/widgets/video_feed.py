@@ -21,6 +21,7 @@ Recording support::
     feed.stop_recording()
 """
 
+import sys
 import cv2
 import numpy as np
 from pathlib import Path
@@ -28,7 +29,7 @@ from PyQt6.QtCore import QThread, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import QLabel, QSizePolicy, QWidget
 
-from app.utils.config import CAMERA_INDEX
+from app.utils.config import CAMERA_INDEX, CAMERA_WARMUP_FRAMES
 from app.utils.config import VIDEO_RECORDING_FOURCC, VIDEO_RECORDING_FPS_FALLBACK
 from app.utils.logger import get_logger
 
@@ -58,29 +59,65 @@ class _CameraWorker(QThread):
     def run(self) -> None:
         """Capture loop — runs until ``stop()`` is called."""
         logger.debug("Camera worker thread %s started.", self.objectName())
-        cap = cv2.VideoCapture(self._camera_index)
-        
-        # On some systems, index 1 might take a moment to initialize if just plugged in.
-        if not cap.isOpened() and self._camera_index > 0:
-            logger.warning("Camera index %d failed, checking if index 0 is available...", self._camera_index)
-            # We don't auto-fallback to 0 here to respect user preference for external,
-            # but we log the attempt.
-            
+
+        # On macOS the default backend is already AVFoundation, but specifying it
+        # explicitly avoids OpenCV picking an incompatible backend on mixed setups.
+        backend = cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_ANY
+        cap = cv2.VideoCapture(self._camera_index, backend)
+
         if not cap.isOpened():
             msg = f"Cannot open camera index {self._camera_index}."
             logger.error(msg)
             self.error_occurred.emit(msg)
             return
 
+        # Reduce the internal buffer to 1 frame — on macOS/AVFoundation this
+        # prevents the driver from delivering stale frames after initialization
+        # and avoids the "opens but read() returns False" failure mode.
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        # Warmup phase: some USB cameras report isOpened()=True before they are
+        # actually ready to stream.  Read and discard up to CAMERA_WARMUP_FRAMES
+        # frames; the first successful read marks the camera as ready.
+        warmed_up = False
+        for _ in range(CAMERA_WARMUP_FRAMES):
+            ret, _ = cap.read()
+            if ret:
+                warmed_up = True
+                break
+            QThread.msleep(33)  # ~30 fps cadence
+
+        if not warmed_up:
+            msg = (
+                f"Camera index {self._camera_index} opened but produced no frames "
+                f"after {CAMERA_WARMUP_FRAMES} warmup attempts. "
+                "Check that the camera is connected and not in use by another application."
+            )
+            logger.error(msg)
+            self.error_occurred.emit(msg)
+            cap.release()
+            return
+
         self._running = True
         logger.info("Camera %d opened successfully.", self._camera_index)
+
+        _consecutive_failures = 0
+        _FAILURE_LOG_THRESHOLD = 30  # log a warning only every N consecutive failures
 
         while self._running:
             ret, frame = cap.read()
             if not ret:
-                logger.warning("Frame capture failed — skipping.")
+                _consecutive_failures += 1
+                if _consecutive_failures % _FAILURE_LOG_THRESHOLD == 1:
+                    logger.warning(
+                        "Frame capture failed (camera %d) — %d consecutive miss(es).",
+                        self._camera_index,
+                        _consecutive_failures,
+                    )
                 QThread.msleep(10)
                 continue
+
+            _consecutive_failures = 0
 
             self._sync_recording_state(cap, frame)
             if self._writer is not None:

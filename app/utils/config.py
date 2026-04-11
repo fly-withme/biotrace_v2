@@ -21,6 +21,10 @@ EYE_TRACKER_CAMERA_INDEX: int = 0
 
 CAMERA_INDEX: int = 1  # OpenCV camera index (usually 1 for external USB on laptops)
 
+# Number of frames to attempt during camera warmup before declaring failure.
+# Covers the macOS/AVFoundation delay where isOpened()=True before streaming starts.
+CAMERA_WARMUP_FRAMES: int = 60  # ~2 seconds at 30 fps
+
 # Video recording output settings.
 VIDEO_RECORDINGS_DIR: str = "recordings"
 VIDEO_RECORDING_FPS_FALLBACK: float = 30.0
