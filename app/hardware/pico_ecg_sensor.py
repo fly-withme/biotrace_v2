@@ -117,17 +117,34 @@ def find_pico_port() -> str | None:
 class _RPeakDetector:
     """Stateful R-peak detector for a continuous ECG sample stream.
 
-    Implements a threshold + refractory period algorithm that requires no
-    look-ahead, making it suitable for real-time, sample-by-sample processing.
+    Implements DC-offset removal followed by a threshold + refractory period
+    algorithm that requires no look-ahead, making it suitable for real-time,
+    sample-by-sample processing.
+
+    DC offset removal
+    -----------------
+    A slow exponential moving average (EMA) tracks the wandering baseline
+    (skin–electrode impedance shift, signal offset, etc.).  Each incoming
+    sample is centred around zero by subtracting this baseline estimate
+    before peak detection.  This makes the algorithm robust to:
+
+    - Large DC offsets (e.g. reciprocal-mode sensors outputting values ~20)
+    - Slow baseline drift
+    - Sensors with varying signal orientations
 
     Args:
         sample_rate_hz: Sensor sample rate in Hz.
         refractory_samples: Minimum samples between accepted peaks.
         threshold_factor: Fraction of adaptive amplitude used as the trigger
-            threshold (0.0–1.0; default 0.6).
-        amplitude_window: Number of recent samples used to estimate the
-            signal amplitude (running maximum).
+            threshold (0.0–1.0; default 0.65).
+        amplitude_window: Number of recent AC samples used to estimate the
+            signal amplitude (running maximum of the AC component).
     """
+
+    # EMA alpha for baseline tracking.  At 150 Hz this adapts over ~3 s,
+    # fast enough to follow electrode drift but slow enough not to follow
+    # the R-peak itself.
+    _DC_EMA_ALPHA: float = 0.002
 
     def __init__(
         self,
@@ -145,6 +162,7 @@ class _RPeakDetector:
         self._last_peak_sample: int = -refractory_samples  # sentinel
         self._sample_index: int = 0
         self._peak_sample_index: int | None = None  # index of the pending peak
+        self._dc_baseline: float | None = None       # slow-moving DC estimate
 
     def reset(self) -> None:
         """Reset all internal state (call between sessions)."""
@@ -153,39 +171,54 @@ class _RPeakDetector:
         self._last_peak_sample = -self._refractory
         self._sample_index = 0
         self._peak_sample_index = None
+        self._dc_baseline = None
 
     def feed(self, value: float) -> float | None:
         """Process one ECG sample and return an RR interval if a peak is detected.
 
+        Applies DC baseline removal before peak detection so the algorithm
+        works correctly regardless of the signal's absolute offset.
+
         Args:
-            value: Raw ECG amplitude (original orientation, not reciprocal).
+            value: Raw ECG amplitude (after any parser-level inversion).
 
         Returns:
             RR interval in milliseconds if a new R-peak was detected, otherwise
             ``None``.
         """
-        self._window.append(value)
+        # ── 1. DC baseline removal ────────────────────────────────────────
+        if self._dc_baseline is None:
+            self._dc_baseline = value
+        else:
+            self._dc_baseline = (
+                self._DC_EMA_ALPHA * value
+                + (1.0 - self._DC_EMA_ALPHA) * self._dc_baseline
+            )
+        ac = value - self._dc_baseline   # zero-centred AC component
+
+        # ── 2. Adaptive amplitude from AC window ─────────────────────────
+        self._window.append(ac)
         self._sample_index += 1
 
-        # Adaptive amplitude: maximum of the recent window.
-        if not self._window:
+        amplitude = max(self._window) if self._window else 0.0
+
+        # Guard: if the signal is essentially flat (no meaningful peaks have
+        # been seen yet), skip detection to avoid noise triggers.
+        if amplitude <= 0.0:
             return None
-        amplitude = max(self._window)
 
         threshold = self._threshold_factor * amplitude
-        above = value >= threshold
+        above = ac >= threshold
 
         rr_ms: float | None = None
 
         if above and not self._above_threshold:
             # Rising edge: start tracking this excursion.
             self._above_threshold = True
-            self._peak_sample_index = self._sample_index  # capture upstroke start
+            self._peak_sample_index = self._sample_index
 
         elif not above and self._above_threshold:
-            # Falling edge: the peak occurred somewhere in the excursion.
-            # We use the sample index captured at the rising edge as an
-            # approximation (good enough at 150 Hz).
+            # Falling edge: a peak occurred during the excursion.
             self._above_threshold = False
 
             peak_idx = self._peak_sample_index
@@ -194,9 +227,7 @@ class _RPeakDetector:
             if samples_since_last >= self._refractory:
                 rr_ms = (samples_since_last / self._sample_rate_hz) * 1000.0
                 self._last_peak_sample = peak_idx
-                logger.debug(
-                    "R-peak at sample %d → RR = %.1f ms", peak_idx, rr_ms
-                )
+                logger.debug("R-peak at sample %d → RR = %.1f ms", peak_idx, rr_ms)
 
         return rr_ms
 
@@ -262,7 +293,6 @@ class _SerialWorker(QThread):
         _lines_received: int = 0
         _lines_matched: int = 0
         _rr_emitted: int = 0
-        _DIAG_SAMPLE_LINES: int = 30   # log this many raw lines on first contact
         _WARN_INTERVAL: int = 200       # warn every N lines if still no matches
 
         try:
@@ -284,14 +314,6 @@ class _SerialWorker(QThread):
                     continue
 
                 _lines_received += 1
-
-                # Log the first N raw lines so the data format is visible in
-                # the application log — helps diagnose channel-name mismatches.
-                if _lines_received <= _DIAG_SAMPLE_LINES:
-                    logger.info(
-                        "Pico raw [%d/%d]: %r",
-                        _lines_received, _DIAG_SAMPLE_LINES, line,
-                    )
 
                 # Periodic warning when lines arrive but none match the parser.
                 if (
