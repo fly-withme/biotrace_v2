@@ -385,10 +385,11 @@ class _EyePreviewWorker(QThread):
         """
         center = (w // 2, h // 2)
 
-        # Guide ring radius: 20 % of the shorter frame edge.
-        guide_r = max(8, int(min(h, w) * 0.20))
-        # Crosshair arm length: 4 % of shorter edge.
-        arm = max(6, int(min(h, w) * 0.04))
+        # Guide ring radius: 35 % of the shorter frame edge — large enough to
+        # be clearly visible at any camera resolution.
+        guide_r = max(12, int(min(h, w) * 0.35))
+        # Crosshair arm length: 6 % of shorter edge.
+        arm = max(8, int(min(h, w) * 0.06))
 
         if quality == "good":
             guide_rgb = (50, 200, 80)
@@ -397,9 +398,9 @@ class _EyePreviewWorker(QThread):
         else:
             guide_rgb = (140, 140, 160)
 
-        cv2.circle(frame, center, guide_r, guide_rgb, 1, cv2.LINE_AA)
-        cv2.line(frame, (center[0] - arm, center[1]), (center[0] + arm, center[1]), guide_rgb, 1)
-        cv2.line(frame, (center[0], center[1] - arm), (center[0], center[1] + arm), guide_rgb, 1)
+        cv2.circle(frame, center, guide_r, guide_rgb, 2, cv2.LINE_AA)
+        cv2.line(frame, (center[0] - arm, center[1]), (center[0] + arm, center[1]), guide_rgb, 2)
+        cv2.line(frame, (center[0], center[1] - arm), (center[0], center[1] + arm), guide_rgb, 2)
 
         # Detected pupil circle
         if diameter > 0.0:
@@ -802,18 +803,19 @@ class CalibrationView(QWidget):
 
     @pyqtSlot()
     def _on_eye_locked(self) -> None:
-        """Called when the eye preview confirms good alignment for ~1 s."""
+        """Called when the eye preview confirms good alignment for ~0.5 s.
+
+        Unlocks the Start button and updates the instruction text so the user
+        knows they need to press it.  No auto-start — the user must confirm
+        their position intentionally.
+        """
         self._cta_btn.setEnabled(True)
-        # Auto-start the breathing calibration after 2 s — user can also
-        # click Start manually within that window.
-        self._eye_autostart_timer.start()
-        logger.info("Eye alignment locked — auto-start in 2 s.")
+        self._status_label.setText("Eye aligned — press Start to begin calibration")
+        logger.info("Eye alignment locked — waiting for user to press Start.")
 
     @pyqtSlot()
     def _auto_start_after_eye_lock(self) -> None:
-        """Trigger breathing calibration automatically after eye alignment."""
-        if not self._recording and not self._prestart_active and not self._complete:
-            self._start_prestart_countdown()
+        """Unused — auto-start removed in favour of explicit user confirmation."""
 
     @pyqtSlot()
     def _on_eye_cam_unavailable(self) -> None:

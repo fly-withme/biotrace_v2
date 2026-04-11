@@ -259,6 +259,12 @@ class _SerialWorker(QThread):
 
         logger.info("Serial port %s opened at %d baud.", self._port, self._baud)
 
+        _lines_received: int = 0
+        _lines_matched: int = 0
+        _rr_emitted: int = 0
+        _DIAG_SAMPLE_LINES: int = 30   # log this many raw lines on first contact
+        _WARN_INTERVAL: int = 200       # warn every N lines if still no matches
+
         try:
             while not self._stop_requested:
                 try:
@@ -277,12 +283,42 @@ class _SerialWorker(QThread):
                 except Exception:
                     continue
 
+                _lines_received += 1
+
+                # Log the first N raw lines so the data format is visible in
+                # the application log — helps diagnose channel-name mismatches.
+                if _lines_received <= _DIAG_SAMPLE_LINES:
+                    logger.info(
+                        "Pico raw [%d/%d]: %r",
+                        _lines_received, _DIAG_SAMPLE_LINES, line,
+                    )
+
+                # Periodic warning when lines arrive but none match the parser.
+                if (
+                    _lines_matched == 0
+                    and _lines_received > 0
+                    and _lines_received % _WARN_INTERVAL == 0
+                ):
+                    logger.warning(
+                        "Pico serial: %d lines received, 0 matched Yeda pattern. "
+                        "Check that the ECG channel name in the firmware matches "
+                        "'Yeda<N>:(value,)'. Raw sample logged above.",
+                        _lines_received,
+                    )
+
                 ecg_value = _parse_yeda_value(line)
                 if ecg_value is None:
                     continue
 
+                _lines_matched += 1
+                if _lines_matched == 1:
+                    logger.info("Pico parser: first Yeda sample matched — ECG data flowing.")
+
                 rr_ms = self._detector.feed(ecg_value)
                 if rr_ms is not None:
+                    _rr_emitted += 1
+                    if _rr_emitted == 1:
+                        logger.info("Pico R-peak: first RR interval detected (%.1f ms).", rr_ms)
                     self.rr_interval_ready.emit(rr_ms, time.time())
 
         finally:

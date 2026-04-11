@@ -51,7 +51,10 @@ class _CameraWorker(QThread):
     def __init__(self, camera_index: int = CAMERA_INDEX) -> None:
         super().__init__()
         self._camera_index = camera_index
-        self._running = False
+        # _stop_requested is set by stop() and checked throughout run() so that
+        # calling stop() during the warmup phase terminates the thread cleanly
+        # instead of letting warmup finish and then re-arming the capture loop.
+        self._stop_requested: bool = False
         self._record_target_path: str | None = None
         self._recording_enabled: bool = False
         self._writer: cv2.VideoWriter | None = None
@@ -79,8 +82,13 @@ class _CameraWorker(QThread):
         # Warmup phase: some USB cameras report isOpened()=True before they are
         # actually ready to stream.  Read and discard up to CAMERA_WARMUP_FRAMES
         # frames; the first successful read marks the camera as ready.
+        # Each iteration checks _stop_requested so stop() terminates the thread
+        # immediately rather than waiting up to 2 s for warmup to finish.
         warmed_up = False
         for _ in range(CAMERA_WARMUP_FRAMES):
+            if self._stop_requested:
+                cap.release()
+                return
             ret, _ = cap.read()
             if ret:
                 warmed_up = True
@@ -98,13 +106,16 @@ class _CameraWorker(QThread):
             cap.release()
             return
 
-        self._running = True
+        if self._stop_requested:
+            cap.release()
+            return
+
         logger.info("Camera %d opened successfully.", self._camera_index)
 
         _consecutive_failures = 0
         _FAILURE_LOG_THRESHOLD = 30  # log a warning only every N consecutive failures
 
-        while self._running:
+        while not self._stop_requested:
             ret, frame = cap.read()
             if not ret:
                 _consecutive_failures += 1
@@ -127,11 +138,13 @@ class _CameraWorker(QThread):
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb.shape
             bytes_per_line = ch * w
-            
-            # Create a QImage that copies the data (.copy()) to ensure it persists 
-            # after the local 'rgb' array is destroyed at the end of this loop.
-            # Using .tobytes() prevents segfaults with PyQt6's QImage binding to numpy memory.
-            qt_image = QImage(rgb.tobytes(), w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+
+            # .tobytes() creates an owned copy so the QImage does not hold a
+            # reference to the numpy array.  .copy() on the QImage ensures it
+            # owns its pixel buffer independently of the bytes object.
+            qt_image = QImage(
+                rgb.tobytes(), w, h, bytes_per_line, QImage.Format.Format_RGB888
+            ).copy()
             self.frame_ready.emit(qt_image)
 
         self._release_writer()
@@ -140,9 +153,9 @@ class _CameraWorker(QThread):
 
     def stop(self) -> None:
         """Signal the capture loop to exit and wait for it to finish."""
-        self._running = False
+        self._stop_requested = True
         self.quit()
-        if not self.wait(1000):
+        if not self.wait(1500):
             logger.warning("Camera worker thread did not stop gracefully; terminating.")
             self.terminate()
             self.wait()
@@ -214,6 +227,8 @@ class VideoFeed(QLabel):
         self._camera_index = camera_index
         self._worker: _CameraWorker | None = None
         self._active = False
+
+        self._showing_placeholder: bool = False
 
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -309,11 +324,25 @@ class VideoFeed(QLabel):
         Args:
             qt_image: RGB QImage from worker.
         """
+        if not self._active:
+            return  # feed was stopped; discard any queued frames
+
+        # Clear the placeholder stylesheet on the very first frame so the
+        # background fill and border don't paint over the camera image.
+        if self._showing_placeholder:
+            self._showing_placeholder = False
+            self.setStyleSheet("")
+            self.setText("")
+
+        size = self.size()
+        if size.width() <= 0 or size.height() <= 0:
+            return  # widget not yet laid out — skip until it has a real size
+
         pixmap = QPixmap.fromImage(qt_image)
         # Scale to fit while preserving aspect ratio. FastTransformation is used
         # to ensure the UI thread remains responsive during 1080p feeds.
         scaled = pixmap.scaled(
-            self.size(),
+            size,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.FastTransformation,
         )
@@ -331,6 +360,7 @@ class VideoFeed(QLabel):
     def _show_placeholder(self, text: str) -> None:
         """Display a styled placeholder text instead of a camera frame."""
         from app.ui.theme import COLOR_BACKGROUND, COLOR_BORDER, COLOR_FONT_MUTED, FONT_SUBTITLE
+        self._showing_placeholder = True
         self.setPixmap(QPixmap())  # Clear any stale frame
 
         html = (
