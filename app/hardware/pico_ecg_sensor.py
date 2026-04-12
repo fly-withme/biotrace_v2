@@ -74,6 +74,7 @@ logger = get_logger(__name__)
 # Regex to extract the first tuple-printed float from a Sensory.print() line.
 # Matches patterns like:  Yeda0:(0.00234,)
 _YEDA_RE = re.compile(r"Yeda\d+:\(([^,)]+),?\)")
+_MOI_RE = re.compile(r"(MOI\d+):\(([^,)]+),?\)")
 
 # USB vendor IDs that identify a Pi Pico or compatible CircuitPython device.
 _PICO_VIDS: frozenset[int] = frozenset({
@@ -247,6 +248,7 @@ class _SerialWorker(QThread):
     """
 
     rr_interval_ready = pyqtSignal(float, float)   # (rr_ms, timestamp_s)
+    wall_contact_detected = pyqtSignal()
     connection_lost   = pyqtSignal(str)            # error message
 
     def __init__(
@@ -260,6 +262,8 @@ class _SerialWorker(QThread):
         self._baud = baud
         self._stop_requested = False
         self._detector = _RPeakDetector()
+        self._moi_states: dict[str, bool] = {}
+        self._moi_seen = False
 
     def request_stop(self) -> None:
         """Signal the read loop to exit on next iteration."""
@@ -269,6 +273,8 @@ class _SerialWorker(QThread):
         """Main thread body: open port, parse lines, detect R-peaks."""
         logger.debug("Serial worker thread %s started.", self.objectName())
         self._detector.reset()
+        self._moi_states.clear()
+        self._moi_seen = False
 
         import os
         if not os.path.exists(self._port):
@@ -294,6 +300,7 @@ class _SerialWorker(QThread):
         _lines_matched: int = 0
         _rr_emitted: int = 0
         _WARN_INTERVAL: int = 200       # warn every N lines if still no matches
+        _MOI_WARN_INTERVAL: int = 500   # warn every N lines if no MOI channel ever appears
 
         try:
             while not self._stop_requested:
@@ -313,6 +320,9 @@ class _SerialWorker(QThread):
                 except Exception:
                     continue
 
+                if self._detect_wall_contact(line):
+                    self.wall_contact_detected.emit()
+
                 _lines_received += 1
 
                 # Periodic warning when lines arrive but none match the parser.
@@ -325,6 +335,18 @@ class _SerialWorker(QThread):
                         "Pico serial: %d lines received, 0 matched Yeda pattern. "
                         "Check that the ECG channel name in the firmware matches "
                         "'Yeda<N>:(value,)'. Raw sample logged above.",
+                        _lines_received,
+                    )
+
+                if (
+                    not self._moi_seen
+                    and _lines_received > 0
+                    and _lines_received % _MOI_WARN_INTERVAL == 0
+                ):
+                    logger.warning(
+                        "Pico serial: %d lines received but no MOI wall-contact channel seen. "
+                        "Wall-contact counting requires firmware output like 'MOI0:(0.0,)' or "
+                        "'MOI1:(1.0,)' on the same serial stream.",
                         _lines_received,
                     )
 
@@ -349,6 +371,30 @@ class _SerialWorker(QThread):
             except Exception:
                 pass
             logger.info("Serial port %s closed.", self._port)
+
+    def _detect_wall_contact(self, line: str) -> bool:
+        """Return True once on any MOI channel low→high transition."""
+        moi_values = _parse_moi_values(line)
+        if not moi_values:
+            return False
+
+        self._moi_seen = True
+
+        rising_channels: list[str] = []
+        for channel, value in moi_values.items():
+            is_high = value >= 0.5
+            was_high = self._moi_states.get(channel, False)
+            self._moi_states[channel] = is_high
+            if is_high and not was_high:
+                rising_channels.append(channel)
+
+        if rising_channels:
+            logger.info(
+                "Pico wall contact detected on %s.",
+                ", ".join(sorted(rising_channels)),
+            )
+            return True
+        return False
 
 
 def _parse_yeda_value(line: str) -> float | None:
@@ -383,6 +429,21 @@ def _parse_yeda_value(line: str) -> float | None:
     return 1.0 / reciprocal_value
 
 
+def _parse_moi_values(line: str) -> dict[str, float]:
+    """Extract all MOI channel values from one serial line."""
+    matches = _MOI_RE.findall(line)
+    if not matches:
+        return {}
+
+    values: dict[str, float] = {}
+    for channel, raw_value in matches:
+        try:
+            values[channel] = float(raw_value)
+        except ValueError:
+            continue
+    return values
+
+
 class PicoECGSensor(BaseSensor):
     """Real hardware ECG sensor driver for a Pi Pico running YLab Zero firmware.
 
@@ -407,6 +468,7 @@ class PicoECGSensor(BaseSensor):
     """
 
     raw_rr_interval_received  = pyqtSignal(float, float)   # (rr_ms, timestamp_s)
+    wall_contact_detected     = pyqtSignal()
     connection_status_changed = pyqtSignal(bool, str)       # (connected, message)
 
     def __init__(
@@ -445,6 +507,7 @@ class PicoECGSensor(BaseSensor):
         self._worker = _SerialWorker(self._port, self._baud, parent=None)
         self._worker.setObjectName("PicoECGSerialWorker")
         self._worker.rr_interval_ready.connect(self._on_rr_interval)
+        self._worker.wall_contact_detected.connect(self.wall_contact_detected)
         self._worker.connection_lost.connect(self._on_connection_lost)
         self._worker.finished.connect(self._on_worker_finished)
 
@@ -468,6 +531,7 @@ class PicoECGSensor(BaseSensor):
             # Disconnect to prevent signals during shutdown
             try:
                 self._worker.rr_interval_ready.disconnect(self._on_rr_interval)
+                self._worker.wall_contact_detected.disconnect(self.wall_contact_detected)
                 self._worker.connection_lost.disconnect(self._on_connection_lost)
             except (TypeError, RuntimeError):
                 pass

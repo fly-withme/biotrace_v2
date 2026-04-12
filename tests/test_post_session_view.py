@@ -35,7 +35,7 @@ class TestPostSessionViewHeader:
     def test_start_session_button_is_positioned_left_of_export(
         self, view: PostSessionView, qapp: QApplication
     ) -> None:
-        """The header should place Start Session immediately before Export Data."""
+        """The header should place Start Session before a ghost Export action."""
         assert view._start_session_btn is not None
         assert view._export_btn is not None
 
@@ -44,6 +44,7 @@ class TestPostSessionViewHeader:
         assert view._start_session_btn.text() == "Start Session"
         assert view._export_btn.text().strip() == "Export Data"
         assert view._start_session_btn.x() < view._export_btn.x()
+        assert view._export_btn.objectName() == "secondary"
 
     def test_start_session_button_emits_new_session_requested(
         self, view: PostSessionView

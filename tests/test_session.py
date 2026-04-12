@@ -295,3 +295,17 @@ class TestErrorCounting:
         manager._state = SessionState.RUNNING
         manager._error_counter.error_detected.emit()
         assert manager._error_count == 1
+
+    def test_pico_wall_contact_signal_increments_count(
+        self, db: DatabaseManager, monkeypatch
+    ) -> None:
+        """Wall-contact events from the Pico serial stream increment the count."""
+        monkeypatch.setattr("app.core.session.USE_PICO_ECG", True)
+        from app.core.session import SessionManager as SM
+
+        manager = SM(db)
+        manager._state = SessionState.RUNNING
+
+        manager._hrv_sensor.wall_contact_detected.emit()
+
+        assert manager._error_count == 1

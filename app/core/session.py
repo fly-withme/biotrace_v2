@@ -169,6 +169,8 @@ class SessionManager(QObject):
         # Sensor connection status → public signals
         self._hrv_sensor.connection_status_changed.connect(self.hrv_connection_changed)
         self._eye_tracker.connection_status_changed.connect(self.eye_connection_changed)
+        if hasattr(self._hrv_sensor, "wall_contact_detected"):
+            self._hrv_sensor.wall_contact_detected.connect(self._on_hardware_error)
 
         # Mock camera connection since it's managed externally by the UI widgets
         from PyQt6.QtCore import QTimer

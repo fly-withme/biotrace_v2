@@ -292,7 +292,7 @@ class PostSessionView(QWidget):
         header.addWidget(title_container)
         header.addStretch(1)
 
-        action_button_stylesheet = (
+        primary_action_button_stylesheet = (
             f"""
             QPushButton {{
                 background-color: {COLOR_PRIMARY};
@@ -314,22 +314,45 @@ class PostSessionView(QWidget):
             """
         )
 
+        ghost_action_button_stylesheet = (
+            f"""
+            QPushButton#secondary {{
+                background-color: {COLOR_CARD};
+                color: {COLOR_PRIMARY};
+                border: 1px solid {COLOR_BORDER};
+                border-radius: {FONT_HEADING_2}px;
+                padding: 0px {SPACE_2}px;
+                font-size: {FONT_BODY}px;
+                font-weight: 600;
+            }}
+            QPushButton#secondary:hover {{
+                background-color: {COLOR_PRIMARY_SUBTLE};
+            }}
+            QPushButton#secondary:pressed {{
+                background-color: {COLOR_PRIMARY_SUBTLE};
+                padding-top: 1px;
+                padding-bottom: 0px;
+            }}
+            """
+        )
+
         self._start_session_btn = QPushButton("Start Session")
         self._start_session_btn.setIcon(get_icon("ph.play-fill", color="#FFFFFF"))
         self._start_session_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
         self._start_session_btn.setFixedHeight(FONT_HEADING_2 * 2)
         self._start_session_btn.setMinimumWidth(170)
-        self._start_session_btn.setStyleSheet(action_button_stylesheet)
+        self._start_session_btn.setStyleSheet(primary_action_button_stylesheet)
         self._start_session_btn.clicked.connect(self.new_session_requested.emit)
         header.addWidget(self._start_session_btn)
 
         self._export_btn = QPushButton("Export Data ")
-        self._export_btn.setIcon(get_icon("ph.arrow-right", color="#FFFFFF"))
+        self._export_btn.setObjectName("secondary")
+        self._export_btn.setIcon(get_icon("ph.arrow-right", color=COLOR_PRIMARY))
         self._export_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self._export_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
         self._export_btn.setFixedHeight(FONT_HEADING_2 * 2)
         self._export_btn.setMinimumWidth(170)
-        self._export_btn.setStyleSheet(action_button_stylesheet)
+        self._export_btn.setStyleSheet(ghost_action_button_stylesheet)
         self._export_btn.clicked.connect(self._on_export_clicked)
         header.addWidget(self._export_btn)
 

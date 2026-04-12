@@ -7,7 +7,7 @@ and MainWindow calls ``session_manager.start_session()``).  There is no
 "Start Session" button — the session is already running on arrival.
 
 Toolbar (always visible):
-    ● LIVE SESSION  |  [Biofeedback]  [Camera + Bio]  |  Error Counter  PAUSE  END SESSION
+    ● LIVE SESSION  |  [Biofeedback]  [Camera + Bio]  |  PAUSE  END SESSION
 
 Mode Biofeedback (default, index 0 in the mode stack):
     Top row: CORE STATE SYNTHESIS (circular gauges, 40 %) +
@@ -72,7 +72,6 @@ from app.ui.theme import (
 _SENSOR_CONNECTED_BG    = COLOR_SUCCESS   # #22C55E green fill
 _SENSOR_DISCONNECTED_BG = "#E5E7EB"       # light gray fill
 from app.ui.widgets.donut_gauge import DonutGauge
-from app.ui.widgets.error_input import ErrorInputWidget
 from app.ui.widgets.live_chart import LiveChart
 from app.ui.widgets.level_bar import LevelBar
 from app.ui.widgets.metric_card import MetricCard
@@ -223,8 +222,6 @@ class LiveView(QWidget):
         self._has_pupil_baseline: bool = False  # True once calibration sets a baseline
         self._pdi_min_seen: float = float("inf")
         self._pdi_max_seen: float = float("-inf")
-        self._error_input = ErrorInputWidget(self)
-
         self._clock_timer = QTimer(self)
         self._clock_timer.setInterval(1000)
         self._clock_timer.timeout.connect(self._tick_clock)
@@ -272,11 +269,7 @@ class LiveView(QWidget):
         session_manager.session_ended.connect(self._on_session_ended)
         session_manager.session_paused.connect(self._on_session_paused)
         session_manager.session_resumed.connect(self._on_session_resumed)
-        session_manager.error_count_updated.connect(self._error_input.set_count)
-
-        self._error_input.plus_requested.connect(session_manager.increment_error_count)
-        self._error_input.minus_requested.connect(session_manager.decrement_error_count)
-
+        self._sync_pupil_baseline_state()
         logger.info("LiveView bound to SessionManager.")
 
     # ------------------------------------------------------------------
@@ -346,8 +339,6 @@ class LiveView(QWidget):
         )
 
         # ── Right: session controls ─────────────────────────────────────
-        row.addWidget(self._error_input)
-
         # Pause button (fully round)
         self._pause_btn = QPushButton()
         self._pause_btn.setIconSize(QSize(18, 18))
@@ -570,7 +561,7 @@ class LiveView(QWidget):
         tl_header.addStretch()
 
         # Legend dots
-        for label_text, color in [("WORKLOAD", _COLOR_RMSSD), ("STRESS", _COLOR_CLI)]:
+        for label_text, color in [("WORKLOAD", _COLOR_CLI), ("HRV", _COLOR_RMSSD)]:
             dot = QLabel("●")
             dot.setStyleSheet(f"color: {color}; font-size: 9px;")
             tl_header.addWidget(dot)
@@ -583,8 +574,8 @@ class LiveView(QWidget):
         timeline_layout.addLayout(tl_header)
 
         self._timeline_chart = LiveChart(
-            series=["WORKLOAD", "STRESS"],
-            colours=[_COLOR_RMSSD, _COLOR_CLI],
+            series=["WORKLOAD", "HRV"],
+            colours=[_COLOR_CLI, _COLOR_RMSSD],
             y_label="INDEX (%)",
             y_range=(0.0, 1.0),
             window_seconds=180,
@@ -667,6 +658,7 @@ class LiveView(QWidget):
         hud_layout = QVBoxLayout(hud)
         # Top margin of 100px to clear the floating toolbar
         hud_layout.setContentsMargins(SPACE_3, 100, SPACE_3, SPACE_3)
+        hud_layout.addStretch(1)
         rail_row = QHBoxLayout()
         rail_row.setContentsMargins(0, 0, 0, 0)
         rail_row.setSpacing(0)
@@ -758,9 +750,10 @@ class LiveView(QWidget):
         rail_layout.addWidget(hr_card)
         rail_layout.addStretch(1)
 
-        rail_row.addWidget(rail, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+        rail_row.addWidget(rail, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         rail_row.addStretch(1)
         hud_layout.addLayout(rail_row)
+        hud_layout.addStretch(1)
         layout.addWidget(hud, 0, 0)
         return widget
 
@@ -815,10 +808,9 @@ class LiveView(QWidget):
         logger.info("LiveView: session %d started.", session_id)
         self._session_id = session_id
         self._session_active = True
-        self._has_pupil_baseline = False  # reset — calibration may not have produced one
         self._pdi_min_seen = float("inf")
         self._pdi_max_seen = float("-inf")
-        self._error_input.reset()
+        self._sync_pupil_baseline_state()
         self._reset_widgets()
         self._start_clock()
 
@@ -921,15 +913,16 @@ class LiveView(QWidget):
         """
         self._rmssd_card.set_value(rmssd, timestamp)
 
-        # Map RMSSD to a 0–100 stress percentage for the gauge cards.
-        # RMSSD 20 ms → high stress (100 %), RMSSD 80 ms → low stress (0 %).
-        stress_pct = max(0.0, min(100.0, (1.0 - (rmssd - 20.0) / 60.0) * 100.0))
+        # Map RMSSD into both HRV and stress percentages using the same range.
+        # RMSSD 20 ms → 0 % HRV / 100 % stress, RMSSD 80 ms → 100 % HRV / 0 % stress.
+        hrv_pct = max(0.0, min(100.0, ((rmssd - 20.0) / 60.0) * 100.0))
+        stress_pct = 100.0 - hrv_pct
         self._stress_gauge.set_value(stress_pct / 100.0, f"{stress_pct:.0f}%")
         self._cam_stress_bar.set_value(stress_pct / 100.0)
         self._cam_stress_value.setText(f"{stress_pct:.0f}%")
         
-        # Feed the timeline chart.
-        self._timeline_chart.append("STRESS", timestamp, stress_pct / 100.0)
+        # Feed the timeline chart with the HRV trend explicitly.
+        self._timeline_chart.append("HRV", timestamp, hrv_pct / 100.0)
 
     @pyqtSlot(float, float)
     def on_pdi_updated(self, pdi: float, timestamp: float) -> None:
@@ -966,8 +959,7 @@ class LiveView(QWidget):
     def _on_calibration_complete(self, _baseline_rmssd: float, baseline_pupil_px: float) -> None:
         """Record whether a valid pupil baseline was established."""
         self._has_pupil_baseline = baseline_pupil_px > 0.0
-        if self._has_pupil_baseline:
-            self._pupil_card.set_unit("%")
+        self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
         logger.info(
             "LiveView: calibration complete — pupil baseline %.2f px (has_baseline=%s).",
             baseline_pupil_px, self._has_pupil_baseline,
@@ -1027,7 +1019,7 @@ class LiveView(QWidget):
         for card in (self._pupil_card, self._bpm_card, self._rmssd_card,
                      self._speed_card, self._accuracy_card):
             card.reset()
-        self._pupil_card.set_unit("px")  # reverts to raw-diameter mode until calibration
+        self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
 
         self._workload_gauge.set_value(0.0, "—")
         self._stress_gauge.set_value(0.0, "—")
@@ -1131,15 +1123,10 @@ class LiveView(QWidget):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0) # Minimal spacing to bring label closer
-
-        # Add stretch at top to move the chart downwards
-        layout.addStretch(1)
+        layout.setSpacing(SPACE_1)
 
         gauge = DonutGauge(value=0.0, accent_color=accent, track_color=track, center_text="—", size=180)
-        layout.addWidget(gauge, alignment=Qt.AlignmentFlag.AlignCenter)
-
-        layout.addSpacing(SPACE_2) # Exactly 16px space
+        layout.addWidget(gauge, alignment=Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
 
         title_lbl = QLabel(title)
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1147,11 +1134,18 @@ class LiveView(QWidget):
             f"color: {COLOR_FONT}; font-size: {FONT_SMALL}px; font-weight: 700; letter-spacing: 1.5px;"
         )
         layout.addWidget(title_lbl)
-        
-        # Balance with a bit of space at the bottom (but less than top stretch)
-        layout.addSpacing(SPACE_1)
+        layout.addStretch(1)
 
         return gauge, panel
+
+    def _sync_pupil_baseline_state(self) -> None:
+        """Mirror the current calibration baseline from SessionManager into the UI state."""
+        baseline_pupil_px = 0.0
+        if self._session_manager is not None:
+            baseline_pupil_px = float(getattr(self._session_manager, "baseline_pupil_px", 0.0) or 0.0)
+
+        self._has_pupil_baseline = baseline_pupil_px > 0.0
+        self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
 
     @staticmethod
     def _make_card() -> QFrame:
