@@ -67,7 +67,10 @@ class CLIProcessor(QObject):
         self._pdi_min = min(self._pdi_min, pdi)
         self._pdi_max = max(self._pdi_max, pdi)
 
-        if self._pdi_min == _UNSET or self._pdi_max == -_UNSET:
+        # normalize() returns 0.0 when min == max (degenerate range).
+        # Emit 0.5 (midpoint) until we have a meaningful range.
+        if self._pdi_max - self._pdi_min < 1e-6:
+            self.cli_updated.emit(0.5, timestamp_s)
             return
 
         cli = normalize(pdi, self._pdi_min, self._pdi_max)

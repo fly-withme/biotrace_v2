@@ -19,6 +19,7 @@ The widget can host any number of named series and is thread-safe for
 appending data (since Qt signal slots are used).
 """
 
+import time
 from collections import deque
 
 import pyqtgraph as pg
@@ -93,6 +94,11 @@ class LiveChart(QWidget):
         self._timestamps: dict[str, deque[float]] = {s: deque(maxlen=_MAX_POINTS) for s in series}
         self._values: dict[str, deque[float]] = {s: deque(maxlen=_MAX_POINTS) for s in series}
 
+        # Throttle chart redraws to ~10 fps to avoid GPU/CPU saturation
+        # when sensor data arrives at 30+ fps.
+        self._last_redraw_time: float = 0.0
+        self._redraw_interval_s: float = 0.1  # 100 ms = ~10 fps
+
         self._build_ui(y_label)
 
     # ------------------------------------------------------------------
@@ -147,7 +153,15 @@ class LiveChart(QWidget):
 
         self._timestamps[series_name].append(timestamp)
         self._values[series_name].append(value)
-        self._refresh_curve(series_name)
+
+        now = time.monotonic()
+        if now - self._last_redraw_time >= self._redraw_interval_s:
+            self._last_redraw_time = now
+            # Refresh all dirty series, not just the one that triggered.
+            for name in self._series_names:
+                if self._timestamps[name]:
+                    self._refresh_curve(name)
+        # Data is always buffered; visual refresh is throttled.
 
     def _refresh_curve(self, series_name: str) -> None:
         """Redraw a single curve with the current buffer contents.

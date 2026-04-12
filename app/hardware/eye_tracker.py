@@ -81,6 +81,9 @@ class _PupilWorker(QThread):
 
                 def runWithConfidence(self, gray_img):
                     self._frame_index += 1
+                    # CLAHE improves pupil contrast on low-contrast IR cameras.
+                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                    gray_img = clahe.apply(gray_img)
                     blurred = cv2.GaussianBlur(gray_img, (9, 9), 0)
                     _, thresh = cv2.threshold(
                         blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU

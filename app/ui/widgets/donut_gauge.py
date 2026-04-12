@@ -1,3 +1,5 @@
+import time
+
 from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
@@ -34,6 +36,9 @@ class DonutGauge(QWidget):
         self._half_circle = half_circle
         self._text_color = text_color or COLOR_FONT
         
+        self._last_repaint_time: float = 0.0
+        self._repaint_interval_s: float = 0.1  # Throttle repaints to ~10 fps
+
         if half_circle:
             # Semi-circle plus space for the text which is placed near the baseline
             self.setFixedSize(size, size // 2 + 30)
@@ -41,10 +46,17 @@ class DonutGauge(QWidget):
             self.setFixedSize(size, size)
 
     def set_value(self, value: float, center_text: str) -> None:
-        """Set normalized value and center label text."""
+        """Set normalized value and center label text.
+
+        Repaints are throttled to ~10 fps to avoid excessive CPU use
+        when sensor data arrives at high rates.
+        """
         self._value = max(0.0, min(1.0, value))
         self._center_text = center_text
-        self.update()
+        now = time.monotonic()
+        if now - self._last_repaint_time >= self._repaint_interval_s:
+            self._last_repaint_time = now
+            self.update()
 
     def paintEvent(self, _event) -> None:  # noqa: N802 (Qt API)
         """Render track and arc with anti-aliased painting."""

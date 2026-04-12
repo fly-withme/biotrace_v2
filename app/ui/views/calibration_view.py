@@ -293,10 +293,10 @@ class _EyePreviewWorker(QThread):
     _MAX_DIAMETER_PX: float = 400.0
 
     # Pupil centre must fall within this fraction of the frame dimensions
-    # to be accepted as "good".  0.60 = central 60 % of each axis.
-    _CENTER_ZONE: float = 0.60
-    # Detect only within a compact center ROI to speed up lock acquisition.
-    _DETECTION_ROI_FRACTION: float = 0.55
+    # to be accepted as "good".  0.70 = central 70 % of each axis.
+    _CENTER_ZONE: float = 0.70
+    # Detect within a generous ROI to improve initial pupil acquisition.
+    _DETECTION_ROI_FRACTION: float = 0.80
 
     def __init__(self, camera_index: int) -> None:
         super().__init__()
@@ -388,6 +388,9 @@ class _EyePreviewWorker(QThread):
         y2 = min(h, y1 + roi_h)
 
         gray_roi = gray_zoomed[y1:y2, x1:x2]
+        # CLAHE improves pupil contrast on low-contrast IR eye-tracker cameras.
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray_roi = clahe.apply(gray_roi)
         blurred = cv2.GaussianBlur(gray_roi, (9, 9), 0)
 
         _, thresh = cv2.threshold(

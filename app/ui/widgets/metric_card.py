@@ -181,7 +181,9 @@ class MetricCard(QFrame):
         self._build_ui()
         self._animation = QPropertyAnimation(self, b"display_value", self)
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._animation.setDuration(400)
+        self._animation.setDuration(150)  # Short duration to keep up with sensor data
+        self._last_update_ms: float = 0.0
+        self._update_throttle_ms: float = 100.0  # Min interval between visual updates
 
     # ------------------------------------------------------------------
     # UI construction
@@ -284,24 +286,32 @@ class MetricCard(QFrame):
     def set_value(self, value: float, timestamp: float | None = None) -> None:
         """Update the displayed metric value with a smooth animation.
 
+        Throttled to avoid animation conflicts when data arrives faster
+        than the animation can complete (e.g. 30 fps pupil data).
+
         Args:
             value: New numeric value to display.
             timestamp: Optional Unix timestamp for the sparkline trend.
         """
+        self._raw_value = value
+
         if self._sparkline is not None:
             self._sparkline.append(value, timestamp)
 
         if not self._has_data:
             self._has_data = True
             self._display_value = value
-            self._raw_value = value
             self._refresh_label()
+            self._last_update_ms = time.monotonic() * 1000.0
         else:
+            now_ms = time.monotonic() * 1000.0
+            if now_ms - self._last_update_ms < self._update_throttle_ms:
+                return  # Skip visual update; sparkline already got the data
+            self._last_update_ms = now_ms
             self._animation.stop()
             self._animation.setStartValue(self._display_value)
             self._animation.setEndValue(value)
             self._animation.start()
-            self._raw_value = value
 
         self.value_changed.emit(value)
 
