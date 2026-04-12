@@ -17,6 +17,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from enum import Enum, auto
+from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
@@ -26,12 +27,13 @@ from app.core.metrics import compute_rmssd, average_pupil_diameter
 from app.hardware.mock_sensors import MockHRVSensor, MockEyeTracker
 from app.hardware.error_counter import ErrorCounter
 from app.processing.hrv_processor import HRVProcessor
-from app.utils.config import USE_PICO_ECG, USE_EYE_TRACKER, PICO_ECG_PORT, PICO_ECG_BAUD
+from app.utils.config import USE_PICO_ECG, USE_EYE_TRACKER, PICO_ECG_PORT, PICO_ECG_BAUD, SESSIONS_DIR
 from app.processing.pupil_processor import PupilProcessor
 from app.processing.cli_processor import CLIProcessor
 from app.storage.database import DatabaseManager
 from app.storage.session_repository import SessionRepository
 from app.storage.calibration_repository import CalibrationRepository
+from app.storage.export import SessionExporter
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -88,13 +90,16 @@ class SessionManager(QObject):
 
         self._state = SessionState.IDLE
         self._session_id: int | None = None
+        self._session_dir: Path | None = None
         self._session_start_time: float = 0.0
         self._error_count: int = 0
         self._recording_path: str | None = None
 
+        self._db = db
         # ── Repositories ───────────────────────────────────────────────
         self._session_repo = SessionRepository(db)
         self._cal_repo     = CalibrationRepository(db)
+        self._exporter     = SessionExporter(db)
 
         # ── Data store ─────────────────────────────────────────────────
         self._data_store = DataStore()
@@ -368,6 +373,12 @@ class SessionManager(QObject):
         self._session_id = self._session_repo.create_session(started_at)
         self._data_store.session_id = self._session_id
 
+        # Create session directory: sessions/session_ID_YYYYMMDD_HHMMSS
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._session_dir = Path(SESSIONS_DIR) / f"session_{self._session_id}_{ts}"
+        self._session_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Session directory created: %s", self._session_dir)
+
         # Persist calibration baseline if we have one.
         if self._baseline_rmssd > 0.0 or self._baseline_pupil_px > 0.0:
             self._cal_repo.save_calibration(
@@ -440,6 +451,15 @@ class SessionManager(QObject):
         # Bulk-persist all in-memory samples.
         self._persist_samples()
 
+        # ── AUTOMATIC EXCEL EXPORT ───────────────────────────────────
+        if self._session_id and self._session_dir:
+            excel_path = self._session_dir / f"session_{self._session_id}.xlsx"
+            try:
+                self._exporter.export_excel(self._session_id, excel_path)
+                logger.info("Automatic session export completed: %s", excel_path)
+            except Exception as e:
+                logger.error("Failed to automatically export session %d: %s", self._session_id, e)
+
         finished_id = self._session_id
         self._session_id = None
         self._recording_path = None
@@ -477,6 +497,11 @@ class SessionManager(QObject):
     # ------------------------------------------------------------------
     # Read-only properties
     # ------------------------------------------------------------------
+
+    @property
+    def current_session_dir(self) -> Path | None:
+        """The subfolder for the current session's data (if active)."""
+        return self._session_dir
 
     @property
     def state(self) -> SessionState:

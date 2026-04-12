@@ -55,7 +55,7 @@ class _PupilWorker(QThread):
         self.connection_status_changed.emit(True, "Eye tracker connected")
         
         try:
-            import pypupilext as pp
+            import pypupilext as pp  # type: ignore
             detector = pp.PuRe()
         except ImportError:
             logger.warning("pypupilext not found. Using simple OpenCV fallback for pupil detection.")

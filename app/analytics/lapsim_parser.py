@@ -12,11 +12,9 @@ from typing import Dict, List, Optional
 import pandas as pd
 import openpyxl
 from app.utils.logger import get_logger
+from app.utils.config import LC_MIN_SESSIONS
 
 logger = get_logger(__name__)
-
-# Minimum sessions for a stable learning curve fit.
-LC_MIN_SESSIONS = 5
 
 
 @dataclass
@@ -57,7 +55,7 @@ class LapSimParser:
             return []
 
     def get_participants(self, path: str, sheet_name: str) -> List[Dict[str, str]]:
-        """Return a list of unique participants in the sheet.
+        """Return a list of unique participants who have the minimum required sessions.
         
         Returns:
             List of dicts with 'login', 'firstname', 'lastname' keys.
@@ -67,27 +65,61 @@ class LapSimParser:
             return []
             
         df = pd.read_excel(path, sheet_name=sheet_name, skiprows=header_row_idx)
-        if "Login" not in df.columns:
+        
+        # We need at least Login and Start Time to count valid sessions
+        if "Login" not in df.columns or "Start Time" not in df.columns:
             return []
             
-        # Drop rows where Login is missing
-        df = df.dropna(subset=["Login"])
+        # Drop rows where critical data is missing (these don't count as valid sessions)
+        df = df.dropna(subset=["Login", "Start Time"])
+        
+        # Filter by Session Count
+        session_counts = df.groupby("Login").size()
+        
+        # Keep only logins that meet or exceed the global minimum requirement
+        valid_logins = session_counts[session_counts >= LC_MIN_SESSIONS].index
+        
+        # Filter the dataframe to only include these valid participants
+        df_valid = df[df["Login"].isin(valid_logins)]
+
+        if df_valid.empty:
+            return []
         
         # Determine available name columns
         cols = ["Login"]
-        if "Firstname" in df.columns: cols.append("Firstname")
-        if "Lastname" in df.columns: cols.append("Lastname")
+        if "Firstname" in df_valid.columns: cols.append("Firstname")
+        if "Lastname" in df_valid.columns: cols.append("Lastname")
         
-        unique_participants = df[cols].drop_duplicates()
+        unique_participants = df_valid[cols].drop_duplicates()
         
         results = []
         for _, row in unique_participants.iterrows():
+            # Safely extract names and ignore pandas "nan" strings
+            fname = str(row.get("Firstname", "")).strip()
+            lname = str(row.get("Lastname", "")).strip()
+            
+            if fname.lower() == "nan": fname = ""
+            if lname.lower() == "nan": lname = ""
+
             results.append({
                 "login": str(row["Login"]),
-                "firstname": str(row.get("Firstname", "")),
-                "lastname": str(row.get("Lastname", ""))
+                "firstname": fname,
+                "lastname": lname
             })
         return results
+
+    def get_data_row_count(self, path: str, sheet_name: str) -> int:
+        """Return the number of data rows in a sheet (excluding header)."""
+        header_idx = self._detect_header_row(path, sheet_name)
+        if header_idx is None:
+            return 0
+            
+        try:
+            # Read only the 'Login' column to be fast
+            df = pd.read_excel(path, sheet_name=sheet_name, skiprows=header_idx, usecols=["Login"])
+            return len(df.dropna(subset=["Login"]))
+        except Exception:
+            return 0
 
     def parse(self, path: str, sheet_name: str, login: Optional[str] = None) -> ParsedDataset:
         """Read a specific sheet and return a validated dataset.
@@ -184,15 +216,23 @@ class LapSimParser:
 
         final_login = login if login else str(valid_rows["Login"].iloc[0])
         
-        # Determine participant name
-        p_name = ""
+        # Determine participant name, safely ignoring 'nan'
+        p_name_parts = []
         first_row = valid_rows.iloc[0]
+        
         if "Firstname" in df.columns and pd.notnull(first_row["Firstname"]):
-            p_name += str(first_row["Firstname"])
+            fname = str(first_row["Firstname"]).strip()
+            if fname.lower() != "nan" and fname:
+                p_name_parts.append(fname)
+                
         if "Lastname" in df.columns and pd.notnull(first_row["Lastname"]):
-            if p_name: p_name += " "
-            p_name += str(first_row["Lastname"])
-        if not p_name: p_name = final_login
+            lname = str(first_row["Lastname"]).strip()
+            if lname.lower() != "nan" and lname:
+                p_name_parts.append(lname)
+                
+        p_name = " ".join(p_name_parts)
+        if not p_name: 
+            p_name = final_login
 
         return ParsedDataset(
             participant=final_login,

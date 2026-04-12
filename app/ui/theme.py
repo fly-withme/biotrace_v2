@@ -247,18 +247,45 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0;
 }}
 
-/* ── Line edits / spin boxes ─────────────────────────────────────── */
-QLineEdit, QSpinBox, QDoubleSpinBox {{
+/* ── Line edits / spin boxes / combos ───────────────────────────── */
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
     background-color: {COLOR_CARD};
     border: 1px solid {COLOR_BORDER};
     border-radius: {RADIUS_MD}px;
     padding: 0px 12px;
+    padding-right: 32px;
     height: {INPUT_HEIGHT}px;
     color: {COLOR_FONT};
     font-size: {FONT_BODY}px;
 }}
-QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
     border: 1px solid {COLOR_BORDER_FOCUS};
+}}
+QComboBox::drop-down {{
+    border: none;
+    width: 32px;
+}}
+QComboBox::down-arrow {{
+    image: none;
+    border-left: 5px solid rgba(0,0,0,0);
+    border-right: 5px solid rgba(0,0,0,0);
+    border-top: 5px solid {COLOR_FONT_MUTED};
+    width: 0px;
+    height: 0px;
+    subcontrol-origin: content;
+    subcontrol-position: center;
+}}
+QComboBox::down-arrow:on {{
+    border-top: none;
+    border-bottom: 5px solid {COLOR_FONT_MUTED};
+}}
+QComboBox QAbstractItemView {{
+    background-color: {COLOR_CARD};
+    border: 1px solid {COLOR_BORDER};
+    selection-background-color: {COLOR_PRIMARY_SUBTLE};
+    selection-color: {COLOR_PRIMARY};
+    outline: none;
+    padding: 4px;
 }}
 
 /* ── Sliders (NASA-TLX) ──────────────────────────────────────────── */
@@ -325,4 +352,11 @@ def get_icon(name: str, color: str = COLOR_PRIMARY, size: int = 20) -> QIcon:
     Returns:
         A QIcon object.
     """
-    return qta.icon(name, color=color)
+    try:
+        return qta.icon(name, color=color)
+    except Exception:
+        # Fallback to a basic circle or empty icon if the requested one is missing
+        try:
+            return qta.icon("ph.circle-fill", color=color)
+        except Exception:
+            return QIcon()

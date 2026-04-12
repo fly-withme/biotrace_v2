@@ -41,24 +41,18 @@ class LearningCurveChart(QWidget):
         self._init_ui()
 
     def _init_ui(self) -> None:
-        """Build the chart layout with a header and a plot/placeholder stack."""
+        """Build the chart layout with a plot/placeholder stack."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SPACE_1)
-
-        # Header info (readouts for mastery, leff, pexp)
-        self._header_label = QLabel("Mastery: — %  ·  leff: —  ·  pexp: —")
-        self._header_label.setStyleSheet(
-            f"color: {COLOR_FONT_MUTED}; font-size: {FONT_CAPTION}px; "
-            "font-weight: 700; letter-spacing: 1px;"
-        )
-        layout.addWidget(self._header_label)
 
         # Stack for switching between the plot and a placeholder label
         self._stack = QStackedWidget()
 
         # Plot container
         self._plot_widget = pg.PlotWidget()
+        self._plot_widget.setMouseEnabled(x=False, y=False)
+        self._plot_widget.hideButtons()
         if self._transparent:
             self._plot_widget.setBackground((0, 0, 0, 0))
         else:
@@ -111,12 +105,22 @@ class LearningCurveChart(QWidget):
         if not series:
             self._stack.setCurrentWidget(self._placeholder)
             self._placeholder.setText("No session data available.")
-            self._header_label.setText("Mastery: — %  ·  leff: —  ·  pexp: —")
             return
 
         trials = np.array([dp.trial for dp in series])
-        # performance_score field carries the raw metric value for display.
-        display_values = np.array([dp.performance_score for dp in series])
+        
+        # Extract the raw backend values. Note that lapsim_metrics.py calculates 
+        # a composite error score (0-100, where 100 is worst) and stores it here.
+        raw_backend_values = np.array([dp.performance_score for dp in series])
+
+        # Align the raw data points with the desired display domain
+        if y_axis_inverted:
+            # Domain: Lower is better (e.g., Time, Error Score)
+            display_values = raw_backend_values
+        else:
+            # Domain: Higher is better (Performance Score)
+            # Invert the points so that 100 represents the best possible performance
+            display_values = SCORE_MAX - raw_backend_values
 
         if fit is None:
             self._stack.setCurrentWidget(self._placeholder)
@@ -128,27 +132,9 @@ class LearningCurveChart(QWidget):
                 )
             else:
                 self._placeholder.setText("Learning curve could not be fitted.")
-            self._header_label.setText("Mastery: — %  ·  leff: —  ·  pexp: —")
             return
 
         self._stack.setCurrentWidget(self._plot_widget)
-
-        # Update header readout
-        # mastery_percent expects (fit, current_perf).
-        # If inverted, we should calculate mastery differently?
-        # Actually mastery_percent in learning_curve.py uses maxp_performance.
-        # For external metrics, we calculate it here if needed, or trust the series.
-        m_pct = mastery_percent(fit, display_values[-1])
-        if y_axis_inverted:
-            # For time, mastery is how close we are to the floor.
-            # if floor=40s and current=50s, we are (current-floor)/range? 
-            # Actually Schmettow defines it in the performance domain.
-            # We'll stick to the model's performance score for the % readout.
-            pass
-
-        self._header_label.setText(
-            f"Mastery: {m_pct:.0f}%  ·  leff: {fit.leff:.2f}  ·  pexp: {fit.pexp:.1f}"
-        )
 
         # 1. Actual performance (scatter dots)
         self._plot_widget.plot(
@@ -159,16 +145,15 @@ class LearningCurveChart(QWidget):
         # 2. Fitted curve (solid line)
         t_fit = np.linspace(1, float(trials[-1]), 100)
         
-        # We need to project the curve based on whether we are in error or score domain.
+        # Project the curve based on whether we are in the error domain or score domain.
         def get_curve_val(t):
-            err = fit.scale * (1 - fit.leff)**(t + fit.pexp) + fit.maxp
+            err = fit.scale * (1 - fit.leff)**t + fit.maxp
             if y_axis_inverted:
-                return err # Time domain
+                # Time domain or Error Score domain (lower is better, 0 is target)
+                return err
             else:
-                # Score domain. We need the score_max used for the fit.
-                # We can infer it: score_max = performance_score + errors
-                s_max = display_values[0] + (series[0].error_count)
-                return s_max - err
+                # Score domain. Use the SCORE_MAX constant directly.
+                return SCORE_MAX - err
 
         p_fit = [get_curve_val(t) for t in t_fit]
         self._plot_widget.plot(t_fit, p_fit, pen=pg.mkPen(color=COLOR_PRIMARY, width=2.5))
@@ -203,10 +188,17 @@ class LearningCurveChart(QWidget):
             )
             self._plot_widget.addItem(marker)
 
-        # Adjust range to include the projection
+        # Adjust range to include the projection and asymptote
         self._plot_widget.setXRange(0.5, float(trials[-1] + 3.5), padding=0)
         
-        v_min = min(display_values.min(), asymptote) * 0.9
-        v_max = max(display_values.max(), p_fit[0]) * 1.1
+        # Combine all relevant Y values to find the viewable range
+        all_y = np.concatenate([display_values, p_fit, p_proj, [asymptote]])
+        v_min = all_y.min() * 0.95
+        v_max = all_y.max() * 1.05
+        
+        # Ensure we show a reasonable range even if data is very tight
+        if v_max - v_min < 1.0:
+            v_min -= 5.0
+            v_max += 5.0
+            
         self._plot_widget.setYRange(v_min, v_max, padding=0)
-

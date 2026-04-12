@@ -12,7 +12,7 @@ Usage::
 import csv
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -32,6 +32,43 @@ class SessionExporter:
 
     def __init__(self, db: DatabaseManager) -> None:
         self._conn: sqlite3.Connection = db.get_connection()
+
+    @staticmethod
+    def _parse_datetime(raw: object) -> datetime | None:
+        """Parse an ISO timestamp returned by SQLite."""
+        if raw in (None, ""):
+            return None
+        try:
+            return datetime.fromisoformat(str(raw))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _format_datetime(raw: object) -> str | None:
+        """Format an ISO timestamp as ``YYYY-MM-DD, HH:MM:SS``."""
+        dt = SessionExporter._parse_datetime(raw)
+        if dt is None:
+            return None
+        return dt.strftime("%Y-%m-%d, %H:%M:%S")
+
+    @staticmethod
+    def _format_elapsed_timestamp(started_at: datetime | None, elapsed_s: object) -> str | None:
+        """Convert an elapsed-session timestamp to a formatted absolute time."""
+        if started_at is None or elapsed_s is None:
+            return None
+        try:
+            elapsed = float(elapsed_s)
+        except (TypeError, ValueError):
+            return None
+        return (started_at + timedelta(seconds=elapsed)).strftime("%Y-%m-%d, %H:%M:%S")
+
+    @staticmethod
+    def _mean_or_none(values: list[object]) -> float | None:
+        """Return the arithmetic mean for numeric values, or None."""
+        filtered = [float(value) for value in values if value is not None]
+        if not filtered:
+            return None
+        return sum(filtered) / len(filtered)
 
     def _fetch_session_data(self, session_id: int) -> dict:
         """Collect all data rows for a session into a dict.
@@ -134,8 +171,8 @@ class SessionExporter:
         """Export all session data to a multi-sheet Excel (.xlsx) file.
 
         Sheets produced:
-        - **Session Info** — session metadata (start/end time, duration, notes,
-          NASA-TLX score).
+                - **Session Info** — session metadata (start/end time, duration, notes,
+                    average HRV, average pupil dilation change).
         - **HRV** — per-beat data: timestamp, RR interval, BPM, RMSSD,
           delta-RMSSD.
         - **Pupil** — per-sample data: timestamp, left diameter, right diameter,
@@ -151,38 +188,38 @@ class SessionExporter:
 
         # ── Sheet: Session Info ────────────────────────────────────────────
         session = data["session"]
+        started_dt = self._parse_datetime(session.get("started_at"))
 
         # Compute duration in whole seconds (None when session not yet ended).
         duration_s: int | None = None
         started_raw = session.get("started_at")
         ended_raw   = session.get("ended_at")
-        if started_raw and ended_raw:
-            try:
-                started_dt = datetime.fromisoformat(str(started_raw))
-                ended_dt   = datetime.fromisoformat(str(ended_raw))
-                duration_s = int((ended_dt - started_dt).total_seconds())
-            except ValueError:
-                logger.warning(
-                    "Could not parse duration for session %s", session_id
-                )
+        ended_dt = self._parse_datetime(ended_raw)
+        if started_dt and ended_dt:
+            duration_s = int((ended_dt - started_dt).total_seconds())
+        elif started_raw and ended_raw:
+            logger.warning("Could not parse duration for session %s", session_id)
 
         hrv_count = len(data["hrv"])
+        avg_rmssd = self._mean_or_none([row.get("rmssd") for row in data["hrv"]])
+        avg_pdi = self._mean_or_none([row.get("pdi") for row in data["pupil"]])
 
         info_df = pd.DataFrame(
             [
                 ("Session ID",     session.get("id")),
-                ("Started at",     session.get("started_at")),
-                ("Ended at",       session.get("ended_at")),
+                ("Started at",     self._format_datetime(session.get("started_at"))),
+                ("Ended at",       self._format_datetime(session.get("ended_at"))),
                 ("Duration (s)",   duration_s),
                 ("HRV samples",    hrv_count),
+                ("Average HRV (RMSSD)", avg_rmssd),
+                ("Average Pupil Dilation Change (PDI)", avg_pdi),
                 ("Notes",          session.get("notes", "")),
-                ("NASA-TLX score", session.get("nasa_tlx_score")),
             ],
             columns=["Field", "Value"],
         )
 
         # ── Sheet: Measurements (merged HRV + Pupil, one row per timestamp) ──
-        measurements_df = self._measurements_df(data)
+        measurements_df = self._measurements_df(data, started_dt)
 
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
             info_df.to_excel(writer,          sheet_name="Session Info",  index=False)
@@ -190,7 +227,7 @@ class SessionExporter:
 
         logger.info("Session %d exported to Excel: %s", session_id, path)
 
-    def _measurements_df(self, data: dict) -> pd.DataFrame:
+    def _measurements_df(self, data: dict, started_dt: datetime | None) -> pd.DataFrame:
         """Build the Measurements DataFrame from a session data dict.
 
         Merges HRV and pupil samples on timestamp (outer join), renames
@@ -201,7 +238,7 @@ class SessionExporter:
 
         Returns:
             DataFrame with columns: Time, BPM, HRV, RMSSD, Delta RMSSD,
-            Pupil Diameter, Delta Pupil Diameter.
+            Pupil Diameter [px], Delta Pupil Dilation [PDI].
         """
         hrv_df = pd.DataFrame(
             data["hrv"],
@@ -233,16 +270,25 @@ class SessionExporter:
 
         merged = merged.where(pd.notna(merged), other=None)
 
+        if started_dt is not None:
+            merged["timestamp"] = merged["timestamp"].apply(
+                lambda elapsed: self._format_elapsed_timestamp(started_dt, elapsed)
+            )
+        else:
+            merged["timestamp"] = merged["timestamp"].apply(
+                lambda elapsed: str(elapsed) if elapsed is not None else None
+            )
+
         return merged.rename(columns={
             "timestamp":        "Time",
             "bpm":              "BPM",
             "rr_interval":      "HRV",
             "rmssd":            "RMSSD",
             "delta_rmssd":      "Delta RMSSD",
-            "pupil_diameter":   "Pupil Diameter",
-            "pdi":              "Delta Pupil Diameter",
+            "pupil_diameter":   "Pupil Diameter [px]",
+            "pdi":              "Delta Pupil Dilation [PDI]",
         })[["Time", "BPM", "HRV", "RMSSD", "Delta RMSSD",
-            "Pupil Diameter", "Delta Pupil Diameter"]]
+            "Pupil Diameter [px]", "Delta Pupil Dilation [PDI]"]]
 
     def export_all_sessions(self, path: str | Path) -> None:
         """Export all completed sessions to a single multi-sheet Excel file.
@@ -277,7 +323,7 @@ class SessionExporter:
 
             summary_rows.append({
                 "Session ID":    s["id"],
-                "Date":          str(s["started_at"]),
+                "Date":          self._format_datetime(s["started_at"]),
                 "Duration (s)":  duration_s,
                 "NASA-TLX Score": s["nasa_tlx_score"],
                 "Error Count":   s["error_count"],
@@ -295,7 +341,7 @@ class SessionExporter:
                 sid = s["id"]
                 sheet_name = f"Session {sid}"
                 data = self._fetch_session_data(sid)
-                mdf = self._measurements_df(data)
+                mdf = self._measurements_df(data, self._parse_datetime(s["started_at"]))
                 mdf.to_excel(writer, sheet_name=sheet_name, index=False)
 
         logger.info("All sessions exported to Excel: %s", path)

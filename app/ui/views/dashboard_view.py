@@ -94,6 +94,10 @@ class DashboardView(QWidget):
         self._error_gauge: DonutGauge | None = None
         self._load_gauge: DonutGauge | None = None
 
+        # Per-session biometric stats cached on each refresh() call.
+        # Keys are session IDs; see _load_biometric_stats() for the dict schema.
+        self._biometric_stats: dict[int, dict] = {}
+
         self._progress_plot: pg.PlotWidget | None = None
         self._actual_curve: pg.PlotCurveItem | None = None
         self._estimate_curve: pg.PlotCurveItem | None = None
@@ -544,6 +548,10 @@ class DashboardView(QWidget):
         else:
             self._sessions = []
 
+        # Load per-session biometric stats once so gauges and analysis chart
+        # share the same query results without hitting the DB twice.
+        self._biometric_stats = self._load_biometric_stats()
+
         self._update_session_count()
         self._update_personal_best()
         self._update_gauges()
@@ -607,22 +615,41 @@ class DashboardView(QWidget):
                 session_label.setText("Session —")
 
     def _update_gauges(self) -> None:
-        """Map available session data to the three bottom KPI gauges."""
-        tlx_values = [
-            float(row["nasa_tlx_score"])
-            for row in self._sessions
-            if row["nasa_tlx_score"] is not None
-        ]
-        avg_tlx = (sum(tlx_values) / len(tlx_values)) if tlx_values else 0.0
+        """Map real biometric session data to the three bottom KPI gauges.
 
-        stress_value = min(1.0, (avg_tlx / 100.0) * 0.6)
-        error_value = min(1.0, (avg_tlx / 100.0) * 0.12)
-        load_value = min(1.0, avg_tlx / 100.0)
+        - Ø Stress Events: average number of stress-event samples per session.
+          A stress event is any HRV sample whose RMSSD deviates >30 % from the
+          calibration baseline, or any pupil sample whose |PDI| > 0.30.
+        - Ø Error Rate: average surgical error count per session (from sessions.error_count).
+        - Ø Cognitive Load: average CLI across all sessions (CLI is 0.0–1.0).
+        """
+        stats = self._biometric_stats
+
+        # ── Ø Stress Events ──────────────────────────────────────────────────
+        event_counts = [v["stress_events"] for v in stats.values()]
+        avg_events = sum(event_counts) / len(event_counts) if event_counts else 0.0
+        # Normalize: cap at 200 stress-event samples → gauge full scale.
+        _STRESS_EVENT_CAP = 200
+        stress_value = min(1.0, avg_events / _STRESS_EVENT_CAP)
+
+        # ── Ø Error Rate ─────────────────────────────────────────────────────
+        error_counts = [
+            v["error_count"] for v in stats.values() if v["error_count"] is not None
+        ]
+        avg_errors = sum(error_counts) / len(error_counts) if error_counts else 0.0
+        # Normalize: cap at 20 errors → gauge full scale.
+        _ERROR_CAP = 20
+        error_value = min(1.0, avg_errors / _ERROR_CAP)
+
+        # ── Ø Cognitive Load ─────────────────────────────────────────────────
+        cli_values = [v["avg_cli"] for v in stats.values() if v["avg_cli"] is not None]
+        avg_cli = sum(cli_values) / len(cli_values) if cli_values else 0.0
+        load_value = min(1.0, max(0.0, avg_cli))
 
         if self._stress_gauge is not None:
-            self._stress_gauge.set_value(stress_value, f"{stress_value:.1f}")
+            self._stress_gauge.set_value(stress_value, f"{avg_events:.0f}")
         if self._error_gauge is not None:
-            self._error_gauge.set_value(error_value, f"{error_value * 100:.1f}%")
+            self._error_gauge.set_value(error_value, f"{avg_errors:.1f}")
         if self._load_gauge is not None:
             self._load_gauge.set_value(load_value, f"{load_value * 100:.1f}%")
 
@@ -714,7 +741,17 @@ class DashboardView(QWidget):
         bottom_axis.setTicks([ticks])
 
     def _build_analysis_series(self) -> tuple[list[float], list[float], list[float], list[str]]:
-        """Build percentage series by session for stress and workload."""
+        """Build per-session average biometric trend series.
+
+        Stress series: inverted normalised average RMSSD — high RMSSD means low
+        physiological stress, so the series is flipped so that a rising line
+        indicates rising stress (falling HRV).
+
+        Workload series: average CLI per session scaled to 0–100 %.
+
+        Both axes are expressed as percentages so the existing 0–100 % y-axis
+        labelling remains correct.
+        """
         if not self._sessions:
             x_values = [0.0, 1.0, 2.0, 3.0]
             labels = ["S1", "S2", "S3", "S4"]
@@ -722,8 +759,20 @@ class DashboardView(QWidget):
             workload_values = [46.0, 57.0, 52.0, 63.0]
             return x_values, stress_values, workload_values, labels
 
+        stats = self._biometric_stats
         ordered = sorted(self._sessions, key=lambda row: str(row["started_at"]))
         display = ordered[-12:]
+
+        # Collect RMSSD values across displayed sessions so we can normalise
+        # them to a 0–100 % scale relative to this cohort.
+        rmssd_vals = [
+            stats[s["id"]]["avg_rmssd"]
+            for s in display
+            if s["id"] in stats and stats[s["id"]]["avg_rmssd"] is not None
+        ]
+        rmssd_min = min(rmssd_vals) if rmssd_vals else 0.0
+        rmssd_max = max(rmssd_vals) if rmssd_vals else 1.0
+        rmssd_range = (rmssd_max - rmssd_min) if rmssd_max > rmssd_min else 1.0
 
         x_values: list[float] = []
         stress_values: list[float] = []
@@ -734,18 +783,114 @@ class DashboardView(QWidget):
             x_values.append(float(idx))
             labels.append(f"S{idx + 1}")
 
-            tlx = session["nasa_tlx_score"]
-            if tlx is None:
-                workload = 50.0 + 10.0 * math.sin(idx)
+            sid = session["id"]
+            s = stats.get(sid, {})
+
+            avg_rmssd = s.get("avg_rmssd")
+            avg_cli = s.get("avg_cli")
+
+            # Stress %: invert normalised RMSSD so that lower HRV → higher line.
+            if avg_rmssd is not None:
+                rmssd_norm = (avg_rmssd - rmssd_min) / rmssd_range  # 0 = lowest, 1 = highest
+                stress_pct = max(0.0, min(100.0, (1.0 - rmssd_norm) * 100.0))
             else:
-                workload = max(0.0, min(100.0, float(tlx)))
+                stress_pct = 50.0  # neutral placeholder when no HRV data
 
-            stress = max(0.0, min(100.0, 100.0 - workload))
+            # Workload %: CLI is already 0–1.
+            if avg_cli is not None:
+                workload_pct = max(0.0, min(100.0, avg_cli * 100.0))
+            else:
+                workload_pct = 50.0  # neutral placeholder when no CLI data
 
-            workload_values.append(workload)
-            stress_values.append(stress)
+            stress_values.append(stress_pct)
+            workload_values.append(workload_pct)
 
         return x_values, stress_values, workload_values, labels
+
+    def _load_biometric_stats(self) -> dict[int, dict]:
+        """Query per-session biometric statistics from the database.
+
+        Queries ``hrv_samples``, ``pupil_samples``, ``cli_samples``, and
+        ``calibrations`` to compute, for each session:
+
+        - ``avg_rmssd``: mean RMSSD over the session (ms), or ``None``.
+        - ``avg_cli``:   mean CLI over the session (0–1), or ``None``.
+        - ``stress_events``: number of HRV samples whose RMSSD deviates
+          >30 % from the calibration baseline **plus** the number of pupil
+          samples whose |PDI| > 0.30.  An empty session contributes 0.
+        - ``error_count``: raw surgical error count from the sessions table,
+          or ``None`` when not yet recorded.
+
+        Returns:
+            Dict keyed by session ID.  Always returns an entry for every
+            session in ``self._sessions`` so callers need not guard for
+            missing keys.
+        """
+        if self._db is None:
+            return {}
+
+        conn = self._db.get_connection()
+
+        # Seed with all current sessions so every key is present.
+        stats: dict[int, dict] = {
+            session["id"]: {
+                "avg_rmssd": None,
+                "avg_cli": None,
+                "stress_events": 0,
+                "error_count": session["error_count"],
+            }
+            for session in self._sessions
+        }
+
+        # ── Average RMSSD per session ────────────────────────────────────────
+        for row in conn.execute(
+            "SELECT session_id, AVG(rmssd) FROM hrv_samples "
+            "WHERE rmssd IS NOT NULL GROUP BY session_id"
+        ).fetchall():
+            if row[0] in stats:
+                stats[row[0]]["avg_rmssd"] = row[1]
+
+        # ── Average CLI per session ──────────────────────────────────────────
+        for row in conn.execute(
+            "SELECT session_id, AVG(cli) FROM cli_samples GROUP BY session_id"
+        ).fetchall():
+            if row[0] in stats:
+                stats[row[0]]["avg_cli"] = row[1]
+
+        # ── Calibration baselines (one per session, take the first) ─────────
+        baselines: dict[int, float] = {}
+        for row in conn.execute(
+            "SELECT session_id, baseline_rmssd FROM calibrations "
+            "WHERE baseline_rmssd IS NOT NULL ORDER BY id ASC"
+        ).fetchall():
+            if row[0] not in baselines:
+                baselines[row[0]] = float(row[1])
+
+        # ── HRV stress events: |rmssd − baseline| / baseline > 0.30 ─────────
+        for sid, baseline_rmssd in baselines.items():
+            if sid not in stats or baseline_rmssd <= 0:
+                continue
+            row = conn.execute(
+                "SELECT COUNT(*) FROM hrv_samples "
+                "WHERE session_id = ? AND rmssd IS NOT NULL "
+                "  AND ABS(rmssd - ?) / ? > 0.30",
+                (sid, baseline_rmssd, baseline_rmssd),
+            ).fetchone()
+            if row and row[0]:
+                stats[sid]["stress_events"] += int(row[0])
+
+        # ── Pupil stress events: |PDI| > 0.30 ───────────────────────────────
+        for row in conn.execute(
+            "SELECT session_id, COUNT(*) FROM pupil_samples "
+            "WHERE pdi IS NOT NULL AND ABS(pdi) > 0.30 GROUP BY session_id"
+        ).fetchall():
+            if row[0] in stats:
+                stats[row[0]]["stress_events"] += int(row[1])
+
+        logger.debug(
+            "Biometric stats loaded for %d sessions.", len(stats)
+        )
+        return stats
 
     @staticmethod
     def _compute_session_duration_seconds(

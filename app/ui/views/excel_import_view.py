@@ -63,6 +63,7 @@ from app.ui.theme import (
     WEIGHT_SEMIBOLD,
     get_icon,
 )
+from app.utils.config import LC_MIN_SESSIONS
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -132,13 +133,22 @@ class ExcelImportView(QWidget):
         # Exercise Selector
         self._exercise_card = QWidget()
         self._exercise_card.setVisible(False)
-        ex_layout = QHBoxLayout(self._exercise_card)
-        ex_layout.setContentsMargins(0, 0, 0, 0)
-        ex_layout.setSpacing(SPACE_2)
-        ex_layout.addWidget(QLabel("Exercise:"))
+        ex_layout = QVBoxLayout(self._exercise_card)
+        ex_layout.setContentsMargins(0, SPACE_2, 0, SPACE_2)
+        ex_layout.setSpacing(SPACE_1)
+        
+        ex_header = QHBoxLayout()
+        ex_icon = QLabel()
+        ex_icon.setPixmap(get_icon("ph.activity", color=COLOR_FONT_MUTED).pixmap(16, 16))
+        ex_header.addWidget(ex_icon)
+        ex_label = QLabel("Exercise")
+        ex_label.setStyleSheet(f"color: {COLOR_FONT_MUTED}; font-size: {FONT_SMALL}px; font-weight: {WEIGHT_SEMIBOLD};")
+        ex_header.addWidget(ex_label)
+        ex_header.addStretch(1)
+        ex_layout.addLayout(ex_header)
+        
         self._exercise_combo = QComboBox()
-        self._exercise_combo.setMinimumWidth(200)
-        self._exercise_combo.setFixedHeight(40)
+        self._exercise_combo.setMinimumWidth(240)
         self._exercise_combo.currentIndexChanged.connect(self._on_exercise_changed)
         ex_layout.addWidget(self._exercise_combo)
         controls_row.addWidget(self._exercise_card)
@@ -146,13 +156,22 @@ class ExcelImportView(QWidget):
         # Participant Selector
         self._participant_card = QWidget()
         self._participant_card.setVisible(False)
-        part_layout = QHBoxLayout(self._participant_card)
-        part_layout.setContentsMargins(0, 0, 0, 0)
-        part_layout.setSpacing(SPACE_2)
-        part_layout.addWidget(QLabel("Participant:"))
+        part_layout = QVBoxLayout(self._participant_card)
+        part_layout.setContentsMargins(0, SPACE_2, 0, SPACE_2)
+        part_layout.setSpacing(SPACE_1)
+        
+        part_header = QHBoxLayout()
+        part_icon = QLabel()
+        part_icon.setPixmap(get_icon("ph.user-circle", color=COLOR_FONT_MUTED).pixmap(16, 16))
+        part_header.addWidget(part_icon)
+        part_label = QLabel("Participant")
+        part_label.setStyleSheet(f"color: {COLOR_FONT_MUTED}; font-size: {FONT_SMALL}px; font-weight: {WEIGHT_SEMIBOLD};")
+        part_header.addWidget(part_label)
+        part_header.addStretch(1)
+        part_layout.addLayout(part_header)
+        
         self._participant_combo = QComboBox()
-        self._participant_combo.setMinimumWidth(200)
-        self._participant_combo.setFixedHeight(40)
+        self._participant_combo.setMinimumWidth(240)
         self._participant_combo.currentIndexChanged.connect(self._on_participant_changed)
         part_layout.addWidget(self._participant_combo)
         controls_row.addWidget(self._participant_card)
@@ -204,6 +223,37 @@ class ExcelImportView(QWidget):
         title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header.addWidget(title)
         header.addStretch(1)
+        
+        self._header_import_btn = QPushButton("Import Data")
+        self._header_import_btn.setIcon(get_icon("ph.file-arrow-down", color="#FFFFFF"))
+        self._header_import_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
+        self._header_import_btn.setFixedHeight(FONT_HEADING_2 * 2)
+        self._header_import_btn.setMinimumWidth(170)
+        self._header_import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._header_import_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {COLOR_PRIMARY};
+                color: #FFFFFF;
+                border: none;
+                border-radius: {FONT_HEADING_2}px;
+                padding: 0px {SPACE_2}px;
+                font-size: {FONT_BODY}px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {COLOR_PRIMARY};
+            }}
+            QPushButton:pressed {{
+                background-color: {COLOR_PRIMARY};
+                padding-top: 1px;
+                padding-bottom: 0px;
+            }}
+            """
+        )
+        self._header_import_btn.clicked.connect(self._on_browse_clicked)
+        header.addWidget(self._header_import_btn)
+        
         return header
 
     def _make_card(self, title_text: str) -> QFrame:
@@ -266,15 +316,25 @@ class ExcelImportView(QWidget):
             self._show_error("No sheets found in file.")
             return
 
+        # Only include sheets with at least LC_MIN_SESSIONS
+        valid_sheets = []
+        for s in sheets:
+            if self._parser.get_data_row_count(path, s) >= LC_MIN_SESSIONS:
+                valid_sheets.append(s)
+
+        if not valid_sheets:
+            self._show_error(f"No valid exercises found (at least {LC_MIN_SESSIONS} sessions required).")
+            return
+
         # Populate exercise dropdown
         self._exercise_combo.blockSignals(True)
         self._exercise_combo.clear()
-        for s in sheets:
+        for s in valid_sheets:
             self._exercise_combo.addItem(s, s)
         self._exercise_combo.blockSignals(False)
 
         self._exercise_card.setVisible(True)
-        self._drop_zone.setText(f" {Path(path).name}")
+        self._drop_zone.setVisible(False)
 
         # Select first sheet → triggers participant population + fit
         self._exercise_combo.setCurrentIndex(0)
@@ -342,7 +402,6 @@ class ExcelImportView(QWidget):
 
     def _start_fit_worker(self, trials, errors, score_max, data_points, metric):
         self._drop_zone.setEnabled(False)
-        self._drop_zone.setText("Analysing...")
         
         self._lc_thread = QThread()
         self._lc_worker = LearningCurveWorker(trials, errors, score_max)
@@ -358,20 +417,18 @@ class ExcelImportView(QWidget):
 
     def _on_fit_finished(self, fit: Optional[SchmettowFit], data_points: List[SessionDataPoint], metric: str) -> None:
         self._drop_zone.setEnabled(True)
-        self._drop_zone.setText(" Click or Drop Excel File")
         self._current_fit = fit
         
         self._analysis_card.setVisible(True)
-        self._chart.update_data(data_points, fit, metric_label=metric, y_axis_inverted=True)
+        self._chart.update_data(data_points, fit, metric_label=metric, y_axis_inverted=False)
         
         if fit:
-            self._stats_lbl.setText(
-                f"Participant: {self._current_dataset.participant_name}  •  "
-                f"Exercise: {self._current_dataset.exercise}  •  "
-                f"Learning Efficiency: {fit.leff:.3f}  •  R²: {fit.r_squared:.3f}"
-            )
+            self._stats_lbl.setText("")
+            self._drop_zone.setVisible(False)
         else:
             self._stats_lbl.setText("Could not fit learning curve model to this data.")
+            self._drop_zone.setVisible(True)
+            self._drop_zone.setText(" Click or Drop Excel File")
 
     def _show_error(self, msg: str) -> None:
         self._info_panel.setVisible(True)

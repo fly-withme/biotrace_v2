@@ -45,6 +45,8 @@ class VideoPlayer(QWidget):
     """
 
     timestamp_clicked = pyqtSignal(float)
+    # Emitted continuously during playback and on scrubbing — in milliseconds.
+    playback_position_changed = pyqtSignal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -168,13 +170,14 @@ class VideoPlayer(QWidget):
         )
         self._display.setPixmap(scaled_pixmap)
 
-        # Update slider if playing
+        # Update slider and emit position during playback.
         if self._is_playing:
             curr_ms = self._cap.get(cv2.CAP_PROP_POS_MSEC)
             self._slider.blockSignals(True)
             self._slider.setValue(int(curr_ms))
             self._slider.blockSignals(False)
             self._update_time_label(int(curr_ms))
+            self.playback_position_changed.emit(curr_ms)
 
     def _update_time_label(self, current_ms: int) -> None:
         """Update the MM:SS / MM:SS text."""
@@ -210,6 +213,7 @@ class VideoPlayer(QWidget):
     @pyqtSlot(int)
     def _on_slider_moved(self, value: int) -> None:
         self.seek_to(float(value))
+        self.playback_position_changed.emit(float(value))
 
     @pyqtSlot()
     def _on_slider_released(self) -> None:

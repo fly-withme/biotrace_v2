@@ -9,8 +9,7 @@ from typing import List, Tuple
 
 import numpy as np
 from app.analytics.lapsim_parser import TrialRecord
-
-_SCORE_MAX = 100.0
+from app.utils.config import SCORE_MAX
 
 
 def extract_metric_series(
@@ -35,11 +34,11 @@ def extract_metric_series(
     raw_values = []
 
     # For score inversion, we find the dynamic ceiling of this specific dataset.
-    score_max = 0.0
+    score_max_local = 0.0
     if metric == "Score":
         valid_scores = [t.score for t in trials if t.score is not None]
         if valid_scores:
-            score_max = max(valid_scores)
+            score_max_local = max(valid_scores)
 
     for t in trials:
         val = None
@@ -47,7 +46,7 @@ def extract_metric_series(
             val = t.total_time_s
         elif metric == "Score":
             if t.score is not None:
-                val = score_max - t.score
+                val = score_max_local - t.score
         elif metric == "Tissue Damage (#)":
             val = float(t.tissue_damage) if t.tissue_damage is not None else None
 
@@ -64,13 +63,13 @@ def compute_performance_series(
     """Compute a composite performance error series for Schmettow model fitting.
 
     Combines speed (total time) and accuracy (tissue damage) into a single
-    error metric on a 0–100 scale.  Higher values = worse performance (error
-    domain required by the Schmettow model).
+    error metric scaled by SCORE_MAX. Higher values = worse performance 
+    (error domain required by the Schmettow model).
 
     Formula:
         norm_speed  = (time  - min_time)  / (max_time  - min_time)   ∈ [0, 1]
         norm_acc    = (dmg   - min_dmg)   / (max_dmg   - min_dmg)    ∈ [0, 1]
-        error       = (0.5 × norm_speed + 0.5 × norm_acc) × 100      ∈ [0, 100]
+        error       = (0.5 * norm_speed + 0.5 * norm_acc) * SCORE_MAX
 
     Degenerate cases (all values equal) collapse the corresponding component
     to 0 so the other dimension still drives the fit.
@@ -79,7 +78,7 @@ def compute_performance_series(
         trials: Ordered list of TrialRecord objects for one participant/exercise.
 
     Returns:
-        (trial_numbers, error_values, score_max) where score_max = 100.0.
+        (trial_numbers, error_values, score_max).
 
     References:
         Schmettow, Chan, Groenier (2026). Parametric learning curve models
@@ -93,7 +92,7 @@ def compute_performance_series(
         valid.append((t.trial_number, t.total_time_s, dmg))
 
     if not valid:
-        return np.array([]), np.array([]), _SCORE_MAX
+        return np.array([]), np.array([]), SCORE_MAX
 
     nums   = np.array([v[0] for v in valid], dtype=float)
     speeds = np.array([v[1] for v in valid], dtype=float)
@@ -105,5 +104,5 @@ def compute_performance_series(
             return np.zeros_like(arr)
         return (arr - lo) / (hi - lo)
 
-    errors = (0.5 * _norm(speeds) + 0.5 * _norm(accs)) * _SCORE_MAX
-    return nums, errors, _SCORE_MAX
+    errors = (0.5 * _norm(speeds) + 0.5 * _norm(accs)) * SCORE_MAX
+    return nums, errors, SCORE_MAX

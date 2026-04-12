@@ -26,7 +26,8 @@ CAMERA_INDEX: int = 1  # OpenCV camera index (usually 1 for external USB on lapt
 CAMERA_WARMUP_FRAMES: int = 60  # ~2 seconds at 30 fps
 
 # Video recording output settings.
-VIDEO_RECORDINGS_DIR: str = "recordings"
+SESSIONS_DIR: str = "sessions"
+VIDEO_RECORDINGS_DIR: str = "recordings"  # legacy, replaced by session-specific subfolders
 VIDEO_RECORDING_FPS_FALLBACK: float = 30.0
 VIDEO_RECORDING_FOURCC: str = "mp4v"
 

@@ -1031,8 +1031,12 @@ class LiveView(QWidget):
         if self._video_feed.is_recording:
             return
 
-        recordings_dir = Path(VIDEO_RECORDINGS_DIR)
-        recordings_dir.mkdir(parents=True, exist_ok=True)
+        # Use the session-specific folder if available
+        if self._session_manager and self._session_manager.current_session_dir:
+            recordings_dir = self._session_manager.current_session_dir
+        else:
+            recordings_dir = Path(VIDEO_RECORDINGS_DIR)
+            recordings_dir.mkdir(parents=True, exist_ok=True)
 
         session_label = self._session_id if self._session_id is not None else "unknown"
         file_name = f"session_{session_label}_{int(time.time())}.mp4"

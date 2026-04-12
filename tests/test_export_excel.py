@@ -15,10 +15,10 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from app.storage.database import DatabaseManager
-from app.storage.session_repository import SessionRepository
 from app.storage.calibration_repository import CalibrationRepository
+from app.storage.database import DatabaseManager
 from app.storage.export import SessionExporter
+from app.storage.session_repository import SessionRepository
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +34,8 @@ def db(tmp_path: Path) -> DatabaseManager:
 @pytest.fixture()
 def session_id(db: DatabaseManager) -> int:
     repo = SessionRepository(db)
-    return repo.create_session(datetime.now(tz=timezone.utc))
+    start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+    return repo.create_session(start)
 
 
 @pytest.fixture()
@@ -83,7 +84,7 @@ class TestExportExcel:
         out = tmp_path / "export.xlsx"
         SessionExporter(db).export_excel(populated_session, out)
         wb = openpyxl.load_workbook(out)
-        assert "Session Info"  in wb.sheetnames
+        assert "Session Info" in wb.sheetnames
         assert "Measurements" in wb.sheetnames
 
     def test_empty_session_still_creates_file(
@@ -109,8 +110,8 @@ class TestMeasurementsSheet:
         "HRV",
         "RMSSD",
         "Delta RMSSD",
-        "Pupil Diameter",
-        "Delta Pupil Diameter",
+        "Pupil Diameter [px]",
+        "Delta Pupil Dilation [PDI]",
     ]
 
     def _headers(self, wb: openpyxl.Workbook) -> list[str]:
@@ -175,7 +176,7 @@ class TestMeasurementsSheet:
     ) -> None:
         out = tmp_path / "export.xlsx"
         SessionExporter(db).export_excel(populated_session, out)
-        pupil = self._col(openpyxl.load_workbook(out), "Pupil Diameter")
+        pupil = self._col(openpyxl.load_workbook(out), "Pupil Diameter [px]")
         # t=1.0 → avg(4.8, 4.9) = 4.85; t=3.0 → avg(5.0, 5.1) = 5.05
         assert pytest.approx(pupil[0], abs=0.01) == 4.85
         assert pupil[1] is None  # HRV-only row (t=2.0)
@@ -186,18 +187,22 @@ class TestMeasurementsSheet:
     ) -> None:
         out = tmp_path / "export.xlsx"
         SessionExporter(db).export_excel(populated_session, out)
-        delta = self._col(openpyxl.load_workbook(out), "Delta Pupil Diameter")
+        delta = self._col(openpyxl.load_workbook(out), "Delta Pupil Dilation [PDI]")
         assert pytest.approx(delta[0], abs=0.001) == 0.05
         assert delta[1] is None
         assert pytest.approx(delta[2], abs=0.001) == 0.10
 
-    def test_measurements_rows_sorted_by_time(
+    def test_measurements_times_are_absolute_timestamps(
         self, db: DatabaseManager, populated_session: int, tmp_path: Path
     ) -> None:
         out = tmp_path / "export.xlsx"
         SessionExporter(db).export_excel(populated_session, out)
         times = self._col(openpyxl.load_workbook(out), "Time")
-        assert times == sorted(t for t in times if t is not None)
+        assert times == [
+            "2025-01-01, 10:00:01",
+            "2025-01-01, 10:00:02",
+            "2025-01-01, 10:00:03",
+        ]
 
     def test_measurements_empty_session_has_only_header(
         self, db: DatabaseManager, session_id: int, tmp_path: Path
@@ -209,7 +214,7 @@ class TestMeasurementsSheet:
 
 
 # ---------------------------------------------------------------------------
-# Session Info enrichment — duration + HRV count
+# Session Info enrichment — duration + summary metrics
 # ---------------------------------------------------------------------------
 
 
@@ -220,7 +225,7 @@ def ended_session(db: DatabaseManager) -> int:
     cal_repo = CalibrationRepository(db)
 
     start = datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
-    end   = datetime(2025, 1, 1, 10, 1, 5, tzinfo=timezone.utc)  # 65 s later
+    end = datetime(2025, 1, 1, 10, 1, 5, tzinfo=timezone.utc)  # 65 s later
 
     sid = repo.create_session(start)
     repo.end_session(sid, end)
@@ -233,15 +238,24 @@ def ended_session(db: DatabaseManager) -> int:
             (3.0, 810.0, 35.0, 74.1, 0.9),
         ],
     )
+    cal_repo.save_pupil_samples_bulk(
+        sid,
+        [
+            (1.0, 4.8, 4.9, 0.10),
+            (2.0, 5.0, 5.1, 0.20),
+        ],
+    )
     return sid
 
 
 class TestSessionInfoEnrichment:
-    def _info_dict(self, wb: openpyxl.Workbook) -> dict:
+    def _info_dict(self, wb: openpyxl.Workbook) -> dict[str, object]:
         """Return {Field: Value} mapping from the Session Info sheet."""
         ws = wb["Session Info"]
-        return {ws.cell(row=r, column=1).value: ws.cell(row=r, column=2).value
-                for r in range(2, ws.max_row + 1)}
+        return {
+            ws.cell(row=r, column=1).value: ws.cell(row=r, column=2).value
+            for r in range(2, ws.max_row + 1)
+        }
 
     def test_session_info_contains_duration_field(
         self, db: DatabaseManager, ended_session: int, tmp_path: Path
@@ -258,6 +272,23 @@ class TestSessionInfoEnrichment:
         SessionExporter(db).export_excel(ended_session, out)
         info = self._info_dict(openpyxl.load_workbook(out))
         assert info["Duration (s)"] == 65
+
+    def test_session_info_contains_average_metrics(
+        self, db: DatabaseManager, ended_session: int, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "export.xlsx"
+        SessionExporter(db).export_excel(ended_session, out)
+        info = self._info_dict(openpyxl.load_workbook(out))
+        assert pytest.approx(info["Average HRV (RMSSD)"], abs=0.001) == 33.8666666667
+        assert pytest.approx(info["Average Pupil Dilation Change (PDI)"], abs=0.001) == 0.15
+
+    def test_session_info_does_not_include_nasa_tlx(
+        self, db: DatabaseManager, ended_session: int, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "export.xlsx"
+        SessionExporter(db).export_excel(ended_session, out)
+        info = self._info_dict(openpyxl.load_workbook(out))
+        assert "NASA-TLX score" not in info
 
     def test_session_info_contains_hrv_sample_count_field(
         self, db: DatabaseManager, ended_session: int, tmp_path: Path

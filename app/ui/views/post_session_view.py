@@ -107,7 +107,10 @@ class PostSessionView(QWidget):
 
     def _wire_signals(self) -> None:
         """Connect internal widget signals."""
+        # Clicking on the chart seeks the video.
         self._timeline_chart.timestamp_clicked.connect(self._video_player.seek_to)
+        # Video playback moves the chart playhead.
+        self._video_player.playback_position_changed.connect(self._timeline_chart.set_playhead_ms)
 
     # ------------------------------------------------------------------
     # Public API
@@ -413,7 +416,7 @@ class PostSessionView(QWidget):
         # ── Title + toggle row ─────────────────────────────────────
         title_row = QHBoxLayout()
 
-        title_lbl = QLabel("SESSION ANALYSIS")
+        title_lbl = QLabel("SESSION OVERVIEW")
         title_lbl.setStyleSheet(
             f"color: {COLOR_FONT_MUTED}; font-size: {FONT_CAPTION}px;"
             f" font-weight: {WEIGHT_BOLD}; letter-spacing: 1px;"
@@ -428,7 +431,7 @@ class PostSessionView(QWidget):
             f"border: 1px solid; border-radius: {RADIUS_LG}px;"
             f" padding: 4px 12px; font-size: {FONT_SMALL}px; font-weight: {WEIGHT_SEMIBOLD};"
         )
-        cog_btn = QPushButton(" COGNITIVE LOAD")
+        cog_btn = QPushButton(" PUPIL DILATION")
         cog_btn.setIcon(get_icon("ph.brain-fill", color=COLOR_WARNING))
         cog_btn.setCheckable(True)
         cog_btn.setChecked(True)
