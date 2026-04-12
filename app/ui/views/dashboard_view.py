@@ -620,7 +620,7 @@ class DashboardView(QWidget):
         - Ø Stress Events: average number of stress-event samples per session.
           A stress event is any HRV sample whose RMSSD deviates >30 % from the
           calibration baseline, or any pupil sample whose |PDI| > 0.30.
-        - Ø Error Rate: average surgical error count per session (from sessions.error_count).
+        - Ø Error Rate: average wall-contact frequency in errors per minute.
         - Ø Cognitive Load: average CLI across all sessions (CLI is 0.0–1.0).
         """
         stats = self._biometric_stats
@@ -633,13 +633,15 @@ class DashboardView(QWidget):
         stress_value = min(1.0, avg_events / _STRESS_EVENT_CAP)
 
         # ── Ø Error Rate ─────────────────────────────────────────────────────
-        error_counts = [
-            v["error_count"] for v in stats.values() if v["error_count"] is not None
+        error_rates = [
+            v["error_rate_per_min"]
+            for v in stats.values()
+            if v["error_rate_per_min"] is not None
         ]
-        avg_errors = sum(error_counts) / len(error_counts) if error_counts else 0.0
-        # Normalize: cap at 20 errors → gauge full scale.
-        _ERROR_CAP = 20
-        error_value = min(1.0, avg_errors / _ERROR_CAP)
+        avg_error_rate = sum(error_rates) / len(error_rates) if error_rates else 0.0
+        # Normalize: cap at 5 wall contacts per minute → gauge full scale.
+        _ERROR_RATE_CAP_PER_MIN = 5.0
+        error_value = min(1.0, avg_error_rate / _ERROR_RATE_CAP_PER_MIN)
 
         # ── Ø Cognitive Load ─────────────────────────────────────────────────
         cli_values = [v["avg_cli"] for v in stats.values() if v["avg_cli"] is not None]
@@ -649,7 +651,7 @@ class DashboardView(QWidget):
         if self._stress_gauge is not None:
             self._stress_gauge.set_value(stress_value, f"{avg_events:.0f}")
         if self._error_gauge is not None:
-            self._error_gauge.set_value(error_value, f"{avg_errors:.1f}")
+            self._error_gauge.set_value(error_value, f"{avg_error_rate:.1f}/min")
         if self._load_gauge is not None:
             self._load_gauge.set_value(load_value, f"{load_value * 100:.1f}%")
 
@@ -820,6 +822,8 @@ class DashboardView(QWidget):
           samples whose |PDI| > 0.30.  An empty session contributes 0.
         - ``error_count``: raw surgical error count from the sessions table,
           or ``None`` when not yet recorded.
+        - ``error_rate_per_min``: surgical error frequency for the session,
+          derived from ``error_count / duration_minutes`` when duration is valid.
 
         Returns:
             Dict keyed by session ID.  Always returns an entry for every
@@ -838,6 +842,11 @@ class DashboardView(QWidget):
                 "avg_cli": None,
                 "stress_events": 0,
                 "error_count": session["error_count"],
+                "error_rate_per_min": self._compute_error_rate_per_minute(
+                    session["error_count"],
+                    session["started_at"],
+                    session["ended_at"],
+                ),
             }
             for session in self._sessions
         }
@@ -911,6 +920,27 @@ class DashboardView(QWidget):
         if duration <= 0:
             return None
         return duration
+
+    @classmethod
+    def _compute_error_rate_per_minute(
+        cls,
+        error_count: int | None,
+        started_at: str | None,
+        ended_at: str | None,
+    ) -> float | None:
+        """Return wall-contact frequency as errors per minute for one session."""
+        if error_count is None:
+            return None
+
+        duration_seconds = cls._compute_session_duration_seconds(started_at, ended_at)
+        if duration_seconds is None:
+            return None
+
+        duration_minutes = duration_seconds / 60.0
+        if duration_minutes <= 0:
+            return None
+
+        return float(error_count) / duration_minutes
 
     @staticmethod
     def _format_seconds(total_seconds: int) -> str:

@@ -7,7 +7,7 @@ and MainWindow calls ``session_manager.start_session()``).  There is no
 "Start Session" button — the session is already running on arrival.
 
 Toolbar (always visible):
-    ● LIVE SESSION  |  [Biofeedback]  [Camera + Bio]  |  00:00  PAUSE  END SESSION
+    ● LIVE SESSION  |  [Biofeedback]  [Camera + Bio]  |  Error Counter  PAUSE  END SESSION
 
 Mode Biofeedback (default, index 0 in the mode stack):
     Top row: CORE STATE SYNTHESIS (circular gauges, 40 %) +
@@ -50,6 +50,7 @@ from app.ui.theme import (
     COLOR_PRIMARY_SUBTLE,
     COLOR_SUCCESS,
     COLOR_WARNING,
+    FONT_BODY,
     FONT_CAPTION,
     FONT_HEADING_2,
     FONT_METRIC_XL,
@@ -62,6 +63,7 @@ from app.ui.theme import (
     SPACE_3,
     SPACE_2,
     SPACE_1,
+    SPACE_MICRO,
     CHART_HEIGHT_TIMELINE,
     get_icon,
 )
@@ -70,7 +72,9 @@ from app.ui.theme import (
 _SENSOR_CONNECTED_BG    = COLOR_SUCCESS   # #22C55E green fill
 _SENSOR_DISCONNECTED_BG = "#E5E7EB"       # light gray fill
 from app.ui.widgets.donut_gauge import DonutGauge
+from app.ui.widgets.error_input import ErrorInputWidget
 from app.ui.widgets.live_chart import LiveChart
+from app.ui.widgets.level_bar import LevelBar
 from app.ui.widgets.metric_card import MetricCard
 from app.ui.widgets.video_feed import VideoFeed
 from app.utils.config import CAMERA_INDEX, CLI_THRESHOLD_HIGH, CLI_THRESHOLD_LOW, USE_EYE_TRACKER
@@ -219,6 +223,7 @@ class LiveView(QWidget):
         self._has_pupil_baseline: bool = False  # True once calibration sets a baseline
         self._pdi_min_seen: float = float("inf")
         self._pdi_max_seen: float = float("-inf")
+        self._error_input = ErrorInputWidget(self)
 
         self._clock_timer = QTimer(self)
         self._clock_timer.setInterval(1000)
@@ -267,6 +272,10 @@ class LiveView(QWidget):
         session_manager.session_ended.connect(self._on_session_ended)
         session_manager.session_paused.connect(self._on_session_paused)
         session_manager.session_resumed.connect(self._on_session_resumed)
+        session_manager.error_count_updated.connect(self._error_input.set_count)
+
+        self._error_input.plus_requested.connect(session_manager.increment_error_count)
+        self._error_input.minus_requested.connect(session_manager.decrement_error_count)
 
         logger.info("LiveView bound to SessionManager.")
 
@@ -337,6 +346,8 @@ class LiveView(QWidget):
         )
 
         # ── Right: session controls ─────────────────────────────────────
+        row.addWidget(self._error_input)
+
         # Pause button (fully round)
         self._pause_btn = QPushButton()
         self._pause_btn.setIconSize(QSize(18, 18))
@@ -651,112 +662,105 @@ class LiveView(QWidget):
         # HUD Overlay
         hud = QWidget()
         hud.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        hud.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        hud.setStyleSheet("background: transparent;")
         hud_layout = QVBoxLayout(hud)
         # Top margin of 100px to clear the floating toolbar
         hud_layout.setContentsMargins(SPACE_3, 100, SPACE_3, SPACE_3)
-        hud_layout.addStretch(1)
+        rail_row = QHBoxLayout()
+        rail_row.setContentsMargins(0, 0, 0, 0)
+        rail_row.setSpacing(0)
 
-        # Bottom HUD Container (Single card for all metrics)
-        hud_container = QFrame()
-        hud_container.setStyleSheet(
-            f"background-color: rgba(255, 255, 255, 0.12); "
+        rail = QFrame()
+        rail.setFixedWidth(108)
+        rail.setStyleSheet(
+            f"background-color: rgba(122, 182, 255, 0.18); "
             f"border: none; "
             f"border-radius: {RADIUS_LG}px;"
         )
-        bottom_row = QHBoxLayout(hud_container)
-        bottom_row.setContentsMargins(SPACE_2, SPACE_2, SPACE_2, SPACE_2)
-        bottom_row.setSpacing(SPACE_2)
+        rail_layout = QVBoxLayout(rail)
+        rail_layout.setContentsMargins(SPACE_2, SPACE_2, SPACE_2, SPACE_2)
+        rail_layout.setSpacing(SPACE_1)
 
-        # ── 1. TIME Section ────────────────────────────────────────
-        time_sec = QVBoxLayout()
-        time_sec.setSpacing(SPACE_1)
-        time_title = QLabel("SESSION TIME")
-        time_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        time_title.setStyleSheet("color: rgba(255, 255, 255, 0.7); font-size: 10px; font-weight: 700; letter-spacing: 1px;")
-        time_sec.addWidget(time_title)
+        title_style = (
+            f"color: #BFE4FF; font-size: {FONT_BODY}px; "
+            "font-weight: 700; letter-spacing: 1px;"
+        )
+        value_style = f"color: #EAF6FF; font-size: {FONT_HEADING_2}px; font-weight: 800;"
 
+        def make_side_metric_card(title: str) -> tuple[QWidget, QVBoxLayout]:
+            """Create a compact left-rail metric section without inner boxes."""
+            card = QWidget()
+            card.setStyleSheet("background: transparent;")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(SPACE_MICRO, SPACE_MICRO, SPACE_MICRO, SPACE_MICRO)
+            card_layout.setSpacing(SPACE_MICRO)
+
+            label = QLabel(title)
+            label.setWordWrap(True)
+            label.setStyleSheet(title_style)
+            card_layout.addWidget(label)
+            return card, card_layout
+
+        time_card, time_layout = make_side_metric_card("TIME")
         self._cam_timer_lbl = QLabel("00:00")
-        self._cam_timer_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._cam_timer_lbl.setStyleSheet(
-            f"color: #FFFFFF; font-size: {FONT_DISPLAY}px; font-weight: 800;"
+        self._cam_timer_lbl.setStyleSheet(value_style)
+        time_layout.addWidget(self._cam_timer_lbl)
+        rail_layout.addWidget(time_card)
+
+        workload_card, workload_layout = make_side_metric_card("LOAD")
+        workload_row = QHBoxLayout()
+        workload_row.setSpacing(SPACE_1)
+        workload_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self._cam_workload_bar = LevelBar(
+            accent_color="#8FD3FF",
+            track_color="rgba(191, 228, 255, 0.18)",
         )
-        time_sec.addWidget(self._cam_timer_lbl)
-        bottom_row.addLayout(time_sec, stretch=1)
+        self._cam_workload_bar.setFixedWidth(14)
+        self._cam_workload_bar.setMinimumHeight(72)
+        workload_row.addWidget(self._cam_workload_bar)
+        self._cam_workload_value = QLabel("—")
+        self._cam_workload_value.setStyleSheet(value_style)
+        workload_row.addWidget(self._cam_workload_value)
+        workload_row.addStretch(1)
+        workload_layout.addLayout(workload_row)
+        rail_layout.addWidget(workload_card)
 
-        # ── 2. COGNITIVE LOAD Section ──────────────────────────────
-        cog_sec = QVBoxLayout()
-        cog_sec.setSpacing(SPACE_1)
-        cog_title = QLabel("COGNITIVE LOAD")
-        cog_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        cog_title.setStyleSheet("color: rgba(255, 255, 255, 0.7); font-size: 10px; font-weight: 700; letter-spacing: 1px;")
-        cog_sec.addWidget(cog_title)
-
-        self._cam_workload_gauge = DonutGauge(
-            value=0.0,
-            accent_color=COLOR_PRIMARY,
-            track_color="rgba(255, 255, 255, 0.15)",
-            center_text="—",
-            size=120,
-            text_color="#FFFFFF"
+        stress_card, stress_layout = make_side_metric_card("STRESS")
+        stress_row = QHBoxLayout()
+        stress_row.setSpacing(SPACE_1)
+        stress_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self._cam_stress_bar = LevelBar(
+            accent_color="#8FD3FF",
+            track_color="rgba(191, 228, 255, 0.18)",
         )
-        cog_sec.addWidget(self._cam_workload_gauge, alignment=Qt.AlignmentFlag.AlignCenter)
-        bottom_row.addLayout(cog_sec, stretch=1)
+        self._cam_stress_bar.setFixedWidth(14)
+        self._cam_stress_bar.setMinimumHeight(72)
+        stress_row.addWidget(self._cam_stress_bar)
+        self._cam_stress_value = QLabel("—")
+        self._cam_stress_value.setStyleSheet(value_style)
+        stress_row.addWidget(self._cam_stress_value)
+        stress_row.addStretch(1)
+        stress_layout.addLayout(stress_row)
+        rail_layout.addWidget(stress_card)
 
-        # ── 3. PHYSICAL STRESS Section ─────────────────────────────
-        stress_sec = QVBoxLayout()
-        stress_sec.setSpacing(SPACE_1)
-        stress_title = QLabel("PHYSICAL STRESS")
-        stress_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        stress_title.setStyleSheet("color: rgba(255, 255, 255, 0.7); font-size: 10px; font-weight: 700; letter-spacing: 1px;")
-        stress_sec.addWidget(stress_title)
-
-        self._cam_stress_gauge = DonutGauge(
-            value=0.0,
-            accent_color=_COLOR_CLI,
-            track_color="rgba(255, 255, 255, 0.15)",
-            center_text="—",
-            size=120,
-            text_color="#FFFFFF"
-        )
-        stress_sec.addWidget(self._cam_stress_gauge, alignment=Qt.AlignmentFlag.AlignCenter)
-        bottom_row.addLayout(stress_sec, stretch=1)
-
-        # ── 4. HEART RATE Section ──────────────────────────────────
-        hr_sec = QVBoxLayout()
-        hr_sec.setSpacing(SPACE_1)
-        hr_title = QLabel("HEART RATE")
-        hr_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hr_title.setStyleSheet("color: rgba(255, 255, 255, 0.7); font-size: 10px; font-weight: 700; letter-spacing: 1px;")
-        hr_sec.addWidget(hr_title)
-
-        hr_inner = QVBoxLayout()
-        hr_inner.setSpacing(0)
-        hr_inner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        heart_container = QHBoxLayout()
-        heart_container.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        heart_container.setSpacing(SPACE_1)
-
+        hr_card, hr_layout = make_side_metric_card("BPM")
+        hr_row = QHBoxLayout()
+        hr_row.setSpacing(SPACE_1)
         heart_icon = QLabel()
-        heart_icon.setPixmap(get_icon("ph.heartbeat-fill", color=_COLOR_CLI).pixmap(24, 24))
-        heart_container.addWidget(heart_icon)
-
+        heart_icon.setPixmap(get_icon("ph.heartbeat-fill", color="#8FD3FF").pixmap(16, 16))
+        hr_row.addWidget(heart_icon)
         self._cam_bpm_lbl = QLabel("—")
-        self._cam_bpm_lbl.setStyleSheet(
-            f"color: #FFFFFF; font-size: {FONT_METRIC_XL}px; font-weight: 800;"
-        )
-        heart_container.addWidget(self._cam_bpm_lbl)
-        
-        hr_inner.addLayout(heart_container)
-        bpm_unit = QLabel("BPM")
-        bpm_unit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        bpm_unit.setStyleSheet("color: rgba(255, 255, 255, 0.3); font-size: 10px; font-weight: 700;")
-        hr_inner.addWidget(bpm_unit)
+        self._cam_bpm_lbl.setStyleSheet(value_style)
+        hr_row.addWidget(self._cam_bpm_lbl)
+        hr_row.addStretch(1)
+        hr_layout.addLayout(hr_row)
+        rail_layout.addWidget(hr_card)
+        rail_layout.addStretch(1)
 
-        hr_sec.addLayout(hr_inner)
-        bottom_row.addLayout(hr_sec, stretch=1)
-
-        hud_layout.addWidget(hud_container)
+        rail_row.addWidget(rail, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+        rail_row.addStretch(1)
+        hud_layout.addLayout(rail_row)
         layout.addWidget(hud, 0, 0)
         return widget
 
@@ -814,6 +818,7 @@ class LiveView(QWidget):
         self._has_pupil_baseline = False  # reset — calibration may not have produced one
         self._pdi_min_seen = float("inf")
         self._pdi_max_seen = float("-inf")
+        self._error_input.reset()
         self._reset_widgets()
         self._start_clock()
 
@@ -920,7 +925,8 @@ class LiveView(QWidget):
         # RMSSD 20 ms → high stress (100 %), RMSSD 80 ms → low stress (0 %).
         stress_pct = max(0.0, min(100.0, (1.0 - (rmssd - 20.0) / 60.0) * 100.0))
         self._stress_gauge.set_value(stress_pct / 100.0, f"{stress_pct:.0f}%")
-        self._cam_stress_gauge.set_value(stress_pct / 100.0, f"{stress_pct:.0f}%")
+        self._cam_stress_bar.set_value(stress_pct / 100.0)
+        self._cam_stress_value.setText(f"{stress_pct:.0f}%")
         
         # Feed the timeline chart.
         self._timeline_chart.append("STRESS", timestamp, stress_pct / 100.0)
@@ -952,7 +958,8 @@ class LiveView(QWidget):
             workload = (pdi - self._pdi_min_seen) / pdi_range
             workload_pct = workload * 100.0
             self._workload_gauge.set_value(workload, f"{workload_pct:.0f}%")
-            self._cam_workload_gauge.set_value(workload, f"{workload_pct:.0f}%")
+            self._cam_workload_bar.set_value(workload)
+            self._cam_workload_value.setText(f"{workload_pct:.0f}%")
             self._timeline_chart.append("WORKLOAD", timestamp, workload)
 
     @pyqtSlot(float, float)
@@ -976,7 +983,8 @@ class LiveView(QWidget):
         """
         workload_pct = cli * 100.0
         self._workload_gauge.set_value(cli, f"{workload_pct:.0f}%")
-        self._cam_workload_gauge.set_value(cli, f"{workload_pct:.0f}%")
+        self._cam_workload_bar.set_value(cli)
+        self._cam_workload_value.setText(f"{workload_pct:.0f}%")
         
         self._timeline_chart.append("WORKLOAD", timestamp, cli)
 
@@ -999,7 +1007,8 @@ class LiveView(QWidget):
             self._bpm_card.reset()
             self._rmssd_card.reset()
             self._stress_gauge.set_value(0.0, "—")
-            self._cam_stress_gauge.set_value(0.0, "—")
+            self._cam_stress_bar.set_value(0.0)
+            self._cam_stress_value.setText("—")
             self._cam_bpm_lbl.setText("—")
 
     @pyqtSlot(bool, str)
@@ -1022,8 +1031,11 @@ class LiveView(QWidget):
 
         self._workload_gauge.set_value(0.0, "—")
         self._stress_gauge.set_value(0.0, "—")
-        self._cam_workload_gauge.set_value(0.0, "—")
-        self._cam_stress_gauge.set_value(0.0, "—")
+        self._cam_workload_bar.set_value(0.0)
+        self._cam_stress_bar.set_value(0.0)
+        self._cam_workload_value.setText("—")
+        self._cam_stress_value.setText("—")
+        self._cam_bpm_lbl.setText("—")
 
         self._timeline_chart.clear_all()
 

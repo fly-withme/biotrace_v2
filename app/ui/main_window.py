@@ -97,6 +97,7 @@ class MainWindow(QMainWindow):
 
         # Post-Session "Back to Dashboard" button
         self._post_session_view.back_to_dashboard.connect(lambda: self.navigate_to(0))
+        self._post_session_view.new_session_requested.connect(self._on_new_session_requested)
         self._post_session_view.session_renamed.connect(lambda sid, name: self._populate_recent_sessions())
 
         self.navigate_to(0)

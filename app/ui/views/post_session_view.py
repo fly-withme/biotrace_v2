@@ -82,6 +82,7 @@ class PostSessionView(QWidget):
     """
 
     back_to_dashboard = pyqtSignal()
+    new_session_requested = pyqtSignal()
     session_renamed = pyqtSignal(int, str)
 
     def __init__(
@@ -98,6 +99,8 @@ class PostSessionView(QWidget):
         self._perf_gauge: DonutGauge | None = None
         self._time_gauge: DonutGauge | None = None
         self._err_gauge: DonutGauge | None = None
+        self._start_session_btn: QPushButton | None = None
+        self._export_btn: QPushButton | None = None
 
         self._timeline_chart = TimelineChart()
         self._video_player = VideoPlayer()
@@ -249,7 +252,7 @@ class PostSessionView(QWidget):
         outer.addWidget(scroll)
 
     def _build_header(self) -> QHBoxLayout:
-        """Build the header row: title + status indicators + export button."""
+        """Build the header row: title plus primary session actions."""
         header = QHBoxLayout()
         header.setSpacing(SPACE_2)
 
@@ -289,14 +292,7 @@ class PostSessionView(QWidget):
         header.addWidget(title_container)
         header.addStretch(1)
 
-        # Export Button (Primary Action)
-        export_btn = QPushButton("Export Data ")
-        export_btn.setIcon(get_icon("ph.arrow-right", color="#FFFFFF"))
-        export_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-        export_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
-        export_btn.setFixedHeight(FONT_HEADING_2 * 2)
-        export_btn.setMinimumWidth(170)
-        export_btn.setStyleSheet(
+        action_button_stylesheet = (
             f"""
             QPushButton {{
                 background-color: {COLOR_PRIMARY};
@@ -317,8 +313,25 @@ class PostSessionView(QWidget):
             }}
             """
         )
-        export_btn.clicked.connect(self._on_export_clicked)
-        header.addWidget(export_btn)
+
+        self._start_session_btn = QPushButton("Start Session")
+        self._start_session_btn.setIcon(get_icon("ph.play-fill", color="#FFFFFF"))
+        self._start_session_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
+        self._start_session_btn.setFixedHeight(FONT_HEADING_2 * 2)
+        self._start_session_btn.setMinimumWidth(170)
+        self._start_session_btn.setStyleSheet(action_button_stylesheet)
+        self._start_session_btn.clicked.connect(self.new_session_requested.emit)
+        header.addWidget(self._start_session_btn)
+
+        self._export_btn = QPushButton("Export Data ")
+        self._export_btn.setIcon(get_icon("ph.arrow-right", color="#FFFFFF"))
+        self._export_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self._export_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
+        self._export_btn.setFixedHeight(FONT_HEADING_2 * 2)
+        self._export_btn.setMinimumWidth(170)
+        self._export_btn.setStyleSheet(action_button_stylesheet)
+        self._export_btn.clicked.connect(self._on_export_clicked)
+        header.addWidget(self._export_btn)
 
         return header
 
