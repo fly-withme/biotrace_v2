@@ -126,5 +126,5 @@ DB_PATH: str = "biotrace.db"
 # Learning Curves
 # ---------------------------------------------------------------------------
 
-SCORE_MAX: int = 10          # Maximum possible performance score per session
+SCORE_MAX: int = 100.00          # Maximum possible performance score per session
 LC_MIN_SESSIONS: int = 5     # Minimum sessions with error data before curve is fitted

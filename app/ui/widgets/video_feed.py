@@ -213,10 +213,19 @@ class VideoFeed(QLabel):
     The label scales the frame to fit its current size while preserving the
     aspect ratio.  When no camera is available the label shows a placeholder.
 
+    In addition to rendering frames internally, ``frame_ready`` is emitted for
+    each accepted frame so that secondary display widgets (e.g. a small preview
+    in the biofeedback panel) can subscribe without opening a second camera.
+
     Args:
         camera_index: OpenCV camera index (default from ``config.py``).
         parent: Optional parent widget.
+
+    Signals:
+        frame_ready (QImage): Emitted for every accepted camera frame.
     """
+
+    frame_ready = pyqtSignal(object)  # QImage — proxy for secondary displays
 
     def __init__(
         self,
@@ -347,6 +356,10 @@ class VideoFeed(QLabel):
             Qt.TransformationMode.FastTransformation,
         )
         self.setPixmap(scaled)
+
+        # Broadcast the raw image so secondary display widgets can render it
+        # without opening an additional camera capture thread.
+        self.frame_ready.emit(qt_image)
 
     @pyqtSlot(str)
     def _on_error(self, message: str) -> None:

@@ -130,29 +130,6 @@ class ExcelImportView(QWidget):
         self._drop_zone.clicked.connect(self._on_browse_clicked)
         controls_row.addWidget(self._drop_zone, stretch=1)
 
-        # Exercise Selector
-        self._exercise_card = QWidget()
-        self._exercise_card.setVisible(False)
-        ex_layout = QVBoxLayout(self._exercise_card)
-        ex_layout.setContentsMargins(0, SPACE_2, 0, SPACE_2)
-        ex_layout.setSpacing(SPACE_1)
-        
-        ex_header = QHBoxLayout()
-        ex_icon = QLabel()
-        ex_icon.setPixmap(get_icon("ph.activity", color=COLOR_FONT_MUTED).pixmap(16, 16))
-        ex_header.addWidget(ex_icon)
-        ex_label = QLabel("Exercise")
-        ex_label.setStyleSheet(f"color: {COLOR_FONT_MUTED}; font-size: {FONT_SMALL}px; font-weight: {WEIGHT_SEMIBOLD};")
-        ex_header.addWidget(ex_label)
-        ex_header.addStretch(1)
-        ex_layout.addLayout(ex_header)
-        
-        self._exercise_combo = QComboBox()
-        self._exercise_combo.setMinimumWidth(240)
-        self._exercise_combo.currentIndexChanged.connect(self._on_exercise_changed)
-        ex_layout.addWidget(self._exercise_combo)
-        controls_row.addWidget(self._exercise_card)
-
         # Participant Selector
         self._participant_card = QWidget()
         self._participant_card.setVisible(False)
@@ -175,6 +152,29 @@ class ExcelImportView(QWidget):
         self._participant_combo.currentIndexChanged.connect(self._on_participant_changed)
         part_layout.addWidget(self._participant_combo)
         controls_row.addWidget(self._participant_card)
+
+        # Exercise Selector
+        self._exercise_card = QWidget()
+        self._exercise_card.setVisible(False)
+        ex_layout = QVBoxLayout(self._exercise_card)
+        ex_layout.setContentsMargins(0, SPACE_2, 0, SPACE_2)
+        ex_layout.setSpacing(SPACE_1)
+        
+        ex_header = QHBoxLayout()
+        ex_icon = QLabel()
+        ex_icon.setPixmap(get_icon("ph.activity", color=COLOR_FONT_MUTED).pixmap(16, 16))
+        ex_header.addWidget(ex_icon)
+        ex_label = QLabel("Exercise")
+        ex_label.setStyleSheet(f"color: {COLOR_FONT_MUTED}; font-size: {FONT_SMALL}px; font-weight: {WEIGHT_SEMIBOLD};")
+        ex_header.addWidget(ex_label)
+        ex_header.addStretch(1)
+        ex_layout.addLayout(ex_header)
+        
+        self._exercise_combo = QComboBox()
+        self._exercise_combo.setMinimumWidth(240)
+        self._exercise_combo.currentIndexChanged.connect(self._on_exercise_changed)
+        ex_layout.addWidget(self._exercise_combo)
+        controls_row.addWidget(self._exercise_card)
 
         body_layout.addLayout(controls_row)
 

@@ -303,6 +303,15 @@ class MetricCard(QFrame):
 
         self.value_changed.emit(value)
 
+    def set_unit(self, unit: str) -> None:
+        """Change the unit string appended to the displayed value.
+
+        Args:
+            unit: New unit label (e.g. ``"%"`` or ``"px"``).
+        """
+        self._unit = unit
+        self._refresh_label()
+
     def set_colour(self, colour: str) -> None:
         """Change the value label colour (e.g. for CLI alert zones).
 
