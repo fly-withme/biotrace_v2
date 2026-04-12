@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS pupil_samples (
     timestamp       REAL    NOT NULL,
     left_diameter   REAL,             -- camera units (px)
     right_diameter  REAL,             -- camera units (px)
-    pdi             REAL,             -- (current_diameter − baseline) / baseline
+    pdi             REAL,             -- ((current_diameter − baseline) / baseline) * 100
     delta_pdi       REAL              -- pdi − pdi_previous (cognitive load trend)
 );
 

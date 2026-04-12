@@ -369,6 +369,14 @@ class SessionManager(QObject):
         # Restore baseline in pupil processor (cleared by reset).
         if self._baseline_pupil_px > 0.0:
             self._pupil_proc.set_baseline(self._baseline_pupil_px)
+        else:
+            logger.warning(
+                "Starting session without pupil baseline. Cognitive-load percentages will use a runtime baseline."
+            )
+        if self._baseline_rmssd <= 0.0:
+            logger.warning(
+                "Starting session without RMSSD baseline. Stress percentages will be unavailable."
+            )
 
         # Create DB session record.
         started_at = datetime.now(tz=timezone.utc)

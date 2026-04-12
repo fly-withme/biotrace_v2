@@ -109,7 +109,7 @@ class TestPupilProcessorLogic:
 
     def test_pdi_outlier_clamp(self) -> None:
         """A PDI change exceeding 40% should be rejected."""
-        from app.utils.config import PUPIL_PDI_OUTLIER_CLAMP
+        from app.utils.config import PUPIL_MAX_ABS_PCT_CHANGE
         proc = self._make_processor(baseline=100.0)
         
         # 50% increase (150 px) > 40% clamp
@@ -122,7 +122,8 @@ class TestPupilProcessorLogic:
         # 30% increase (130 px) < 40% clamp
         proc.on_pupil_sample(130.0, 0.0, 2.0)
         assert len(emitted) == 1
-        assert emitted[0] == pytest.approx(0.3)
+        assert PUPIL_MAX_ABS_PCT_CHANGE == pytest.approx(40.0)
+        assert emitted[0] == pytest.approx(30.0)
 
 
 # -------------------------------------------------------------------------

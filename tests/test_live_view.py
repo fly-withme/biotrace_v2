@@ -46,6 +46,16 @@ class TestLiveView:
 
         assert view._rmssd_card._unit == "%"
 
+    def test_bind_session_manager_keeps_raw_units_without_baselines(
+        self, qapp, manager: SessionManager
+    ) -> None:
+        view = LiveView()
+
+        view.bind_session_manager(manager)
+
+        assert view._pupil_card._unit == "px"
+        assert view._rmssd_card._unit == "ms"
+
     def test_session_start_keeps_pupil_percentage_mode_when_baseline_exists(
         self, qapp, manager: SessionManager, monkeypatch
     ) -> None:
@@ -84,6 +94,28 @@ class TestLiveView:
 
         assert view._rmssd_card._raw_value == pytest.approx(25.0)
         assert view._rmssd_card._unit == "%"
+        assert view._stress_gauge._center_text == "25%"
+        assert view._cam_stress_value.text() == "25%"
+
+    def test_rmssd_card_displays_raw_ms_without_baseline(
+        self, qapp
+    ) -> None:
+        view = LiveView()
+
+        view.on_rmssd_updated(50.0, 100.0)
+
+        assert view._rmssd_card._raw_value == pytest.approx(50.0)
+        assert view._rmssd_card._unit == "ms"
+
+    def test_stress_gauge_stays_unavailable_without_baseline(
+        self, qapp
+    ) -> None:
+        view = LiveView()
+
+        view.on_rmssd_updated(80.0, 100.0)
+
+        assert view._stress_gauge._center_text == "—"
+        assert view._cam_stress_value.text() == "—"
 
     def test_rmssd_timeline_uses_running_z_score_normalization(
         self, qapp
@@ -99,24 +131,45 @@ class TestLiveView:
             pytest.approx(1.0),
         ]
 
-    def test_adaptive_workload_uses_pupil_threshold_and_persists_state(
+    def test_cognitive_load_gauge_uses_pupil_change_percentage(
         self, qapp, manager: SessionManager
     ) -> None:
         view = LiveView()
         manager.set_pupil_baseline(120.0)
         view.bind_session_manager(manager)
 
-        view.on_pdi_updated(0.10, 100.0)
-        view.on_pdi_updated(0.10, 100.1)
-        assert view._workload_gauge._center_text == "LOW"
+        view.on_pdi_updated(10.0, 100.0)
+        assert view._workload_gauge._center_text == "50%"
+        assert view._cam_workload_value.text() == "50%"
 
-        view.on_pdi_updated(0.30, 100.15)
-        assert view._workload_gauge._center_text == "LOW"
+        view.on_pdi_updated(30.0, 100.15)
+        assert view._workload_gauge._center_text == "100%"
+        assert list(view._timeline_chart._timestamps["PUPIL"]) == [100.0, 100.15]
+        assert "THRESHOLD" not in view._timeline_chart._timestamps
 
-        view.on_pdi_updated(0.30, 100.4)
-        assert view._workload_gauge._center_text == "HIGH"
-        assert list(view._timeline_chart._timestamps["PUPIL"]) == [100.0, 100.1, 100.15, 100.4]
-        assert len(view._timeline_chart._timestamps["THRESHOLD"]) == 4
+    def test_cognitive_load_gauge_uses_magnitude_for_negative_pupil_change(
+        self, qapp, manager: SessionManager
+    ) -> None:
+        view = LiveView()
+        manager.set_pupil_baseline(120.0)
+        view.bind_session_manager(manager)
+
+        view.on_pdi_updated(-5.0, 100.0)
+
+        assert view._workload_gauge._center_text == "25%"
+        assert view._workload_gauge._value == pytest.approx(0.25)
+
+    def test_pupil_card_shows_magnitude_for_negative_pupil_change(
+        self, qapp, manager: SessionManager
+    ) -> None:
+        view = LiveView()
+        manager.set_pupil_baseline(120.0)
+        view.bind_session_manager(manager)
+
+        view.on_pdi_updated(-7.0, 100.0)
+
+        assert view._pupil_card._raw_value == pytest.approx(7.0)
+        assert view._pupil_card._unit == "%"
 
     def test_pupil_card_displays_percentage_change_when_baseline_exists(
         self, qapp, manager: SessionManager
@@ -125,10 +178,22 @@ class TestLiveView:
         manager.set_pupil_baseline(120.0)
         view.bind_session_manager(manager)
 
-        view.on_pdi_updated(0.12, 100.0)
+        view.on_pdi_updated(12.0, 100.0)
 
         assert view._pupil_card._raw_value == pytest.approx(12.0)
         assert view._pupil_card._unit == "%"
+
+    def test_pupil_card_without_baseline_bootstraps_runtime_percent_for_load_gauge(
+        self, qapp
+    ) -> None:
+        view = LiveView()
+
+        view.on_pdi_updated(100.0, 100.0)
+        view.on_pdi_updated(120.0, 100.1)
+
+        assert view._pupil_card._raw_value == pytest.approx(120.0)
+        assert view._pupil_card._unit == "px"
+        assert view._workload_gauge._center_text == "20%"
 
     def test_error_rate_card_updates_from_wall_contacts(
         self, qapp, manager: SessionManager, monkeypatch

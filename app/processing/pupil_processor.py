@@ -1,7 +1,7 @@
 """Real-time pupil dilation processor for BioTrace.
 
 Subscribes to raw pupil diameter data, rejects blink artifacts, computes
-the Pupil Dilation Index (PDI) relative to the calibration baseline, and
+the pupil percent change relative to the calibration baseline, and
 emits the processed result.
 
 Usage::
@@ -14,10 +14,10 @@ Usage::
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
-from app.core.metrics import average_pupil_diameter, compute_pdi
+from app.core.metrics import average_pupil_diameter, compute_pupil_pct_change
 from app.utils.config import (
     PUPIL_BLINK_VELOCITY_THRESHOLD_PX,
-    PUPIL_PDI_OUTLIER_CLAMP
+    PUPIL_MAX_ABS_PCT_CHANGE,
 )
 from app.utils.logger import get_logger
 
@@ -25,7 +25,7 @@ logger = get_logger(__name__)
 
 
 class PupilProcessor(QObject):
-    """Processes raw pupil diameter streams into blink-cleaned PDI values.
+    """Processes raw pupil diameter streams into blink-cleaned percent change values.
 
     Blink detection uses a velocity threshold: if the diameter drops faster
     than ``PUPIL_BLINK_VELOCITY_THRESHOLD_PX`` per sample the sample is discarded.
@@ -61,7 +61,7 @@ class PupilProcessor(QObject):
     def on_pupil_sample(
         self, left_px: float, right_px: float, timestamp_s: float
     ) -> None:
-        """Receive a raw pupil measurement, reject blinks, emit PDI.
+        """Receive a raw pupil measurement, reject blinks, emit % change.
 
         Args:
             left_px: Left eye pupil diameter in pixels.
@@ -98,14 +98,16 @@ class PupilProcessor(QObject):
             self.pdi_updated.emit(diameter, timestamp_s)
             return
 
-        pdi = compute_pdi(diameter, self.baseline_px)
-
-        # Physiological outlier clamp: discard if change > 40 % from baseline.
-        if abs(pdi) > PUPIL_PDI_OUTLIER_CLAMP:
-            logger.debug("PDI outlier rejected: pdi=%.3f", pdi)
+        pupil_pct_change = compute_pupil_pct_change(diameter, self.baseline_px)
+        if pupil_pct_change is None:
             return
 
-        self.pdi_updated.emit(pdi, timestamp_s)
+        # Physiological outlier clamp: discard if change exceeds max absolute %.
+        if abs(pupil_pct_change) > PUPIL_MAX_ABS_PCT_CHANGE:
+            logger.debug("Pupil %% change outlier rejected: pct=%.3f", pupil_pct_change)
+            return
+
+        self.pdi_updated.emit(pupil_pct_change, timestamp_s)
 
     def reset(self) -> None:
         """Clear state between sessions."""

@@ -81,9 +81,9 @@ HRV_MIN_RR_MS: float = 500.0
 # Tune after testing on real hardware. Start at 20.
 PUPIL_BLINK_VELOCITY_THRESHOLD_PX: float = 20.0
 
-# Pupil outlier clamp: discard if |PDI| > this fraction.
-# 0.40 = 40 % change from baseline — physiological upper bound.
-PUPIL_PDI_OUTLIER_CLAMP: float = 0.40
+# Pupil outlier clamp: discard if |pupil_pct_change| exceeds this percent.
+# 40 % change from baseline is treated as a physiological upper bound.
+PUPIL_MAX_ABS_PCT_CHANGE: float = 40.0
 
 # Calibration baseline recording duration (seconds).
 CALIBRATION_DURATION_SECONDS: int = 60
@@ -100,11 +100,8 @@ CLI_WEIGHT_PDI: float = 0.5
 CLI_THRESHOLD_LOW: float = 0.33     # green  → yellow boundary
 CLI_THRESHOLD_HIGH: float = 0.66    # yellow → red boundary
 
-# Adaptive pupil-workload thresholding.
-WORKLOAD_PUPIL_SMOOTHING_SECONDS: float = 1.0
-WORKLOAD_PUPIL_ROLLING_SECONDS: float = 30.0
-WORKLOAD_THRESHOLD_FACTOR: float = 0.997
-WORKLOAD_STATE_PERSIST_SECONDS: float = 0.2
+# Cognitive-load gauge scaling based on pupil % change from baseline.
+COGNITIVE_LOAD_MAX_PUPIL_PCT: float = 20.0
 
 # Stress interpretation based on relative RMSSD change from baseline.
 STRESS_RMSSD_LOW_DROP_PCT: float = -10.0

@@ -9,9 +9,7 @@ Both series are normalised before plotting:
   Positive values = RMSSD above baseline (lower stress).
   Negative values = RMSSD below baseline (higher stress).
 
-- **Pupil Dilation (PDI)**: ``pdi × 100``
-  PDI is already ``(diameter − baseline) / baseline``, so multiplying by 100
-  yields a direct percentage change.
+- **Pupil Change**: stored as baseline-relative percent change directly.
 
 A persistent grey playhead line tracks the current video position.
 A hover hairline follows the mouse cursor.

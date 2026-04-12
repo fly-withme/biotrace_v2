@@ -1,4 +1,4 @@
-"""Core metric formulas for BioTrace — RMSSD, PDI, and CLI.
+"""Core metric formulas for BioTrace — RMSSD, pupil % change, and CLI.
 
 All computations are pure functions with no side effects.
 They have no dependency on Qt, the UI, or the database.
@@ -56,35 +56,50 @@ def compute_rmssd(rr_intervals: np.ndarray) -> float:
 
 
 # ---------------------------------------------------------------------------
-# PDI — Pupil Dilation Index / Cognitive Load Proxy
+# Pupil % Change — Cognitive Load Proxy
 # ---------------------------------------------------------------------------
 
 
-def compute_pdi(current_diameter_px: float, baseline_diameter_px: float) -> float:
-    """Compute the Pupil Dilation Index (PDI).
+def compute_pupil_pct_change(
+    current_diameter_px: float,
+    baseline_diameter_px: float,
+) -> float | None:
+    """Compute baseline-relative pupil change as a true percentage.
 
-    PDI expresses the relative change in pupil diameter from the resting
-    baseline established during calibration. Larger positive values indicate
-    greater task-induced cognitive load.
+    The metric expresses change from resting baseline as:
+        ((current - baseline) / baseline) * 100
 
-    Formula:
-        PDI = (current_diameter - baseline_diameter) / baseline_diameter
+    Larger positive values indicate dilation; negative values indicate
+    constriction.
 
     Args:
         current_diameter_px: Current pupil diameter in pixels (camera units).
-        baseline_diameter_px: Resting baseline diameter in pixels,
-                              recorded during calibration.
+        baseline_diameter_px: Resting baseline diameter in pixels.
 
     Returns:
-        PDI as a dimensionless ratio. Returns 0.0 if the baseline is zero
-        or negative (guard against division by zero).
+        Percent change from baseline, or ``None`` if inputs are invalid.
     """
-    if baseline_diameter_px <= 0.0:
-        logger.warning("PDI computation skipped: baseline_diameter is %.3f", baseline_diameter_px)
-        return 0.0
+    if baseline_diameter_px <= 0.0 or current_diameter_px <= 0.0:
+        logger.warning(
+            "Pupil %% change skipped: current=%.3f baseline=%.3f",
+            current_diameter_px,
+            baseline_diameter_px,
+        )
+        return None
 
-    pdi = (current_diameter_px - baseline_diameter_px) / baseline_diameter_px
-    return float(pdi)
+    pupil_pct_change = (
+        (current_diameter_px - baseline_diameter_px) / baseline_diameter_px
+    ) * 100.0
+    return float(pupil_pct_change)
+
+
+def compute_pdi(current_diameter_px: float, baseline_diameter_px: float) -> float | None:
+    """Backward-compatible alias for pupil baseline-relative percent change.
+
+    Historically this function returned a ratio called PDI. It now returns
+    true percent change to keep metric semantics consistent across the app.
+    """
+    return compute_pupil_pct_change(current_diameter_px, baseline_diameter_px)
 
 
 def average_pupil_diameter(left: float | None, right: float | None) -> float | None:
@@ -144,7 +159,7 @@ def compute_cli(
     """Compute the Cognitive Load Index (CLI).
 
     CLI combines normalized stress (inverted RMSSD) and normalized cognitive
-    load (PDI) into a single composite score in the [0, 1] range.
+    load (pupil % change) into a single composite score in the [0, 1] range.
 
     Formula:
         CLI = w1 * norm(1 / RMSSD) + w2 * norm(PDI)
@@ -154,7 +169,7 @@ def compute_cli(
 
     Args:
         rmssd: Current RMSSD value in milliseconds.
-        pdi: Current Pupil Dilation Index (dimensionless ratio).
+        pdi: Current pupil percent change from baseline.
         rmssd_min: Session minimum RMSSD observed so far.
         rmssd_max: Session maximum RMSSD observed so far.
         pdi_min: Session minimum PDI observed so far.

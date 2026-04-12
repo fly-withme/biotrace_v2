@@ -711,7 +711,7 @@ class CalibrationView(QWidget):
         skip_btn.setIcon(get_icon("ph.fast-forward-fill", color=COLOR_FONT_MUTED))
         skip_btn.setIconSize(QSize(16, 16))
         skip_btn.setFixedSize(36, 36)
-        skip_btn.setToolTip("Skip calibration")
+        skip_btn.setToolTip("Skip to breathing baseline")
         skip_btn.setStyleSheet(
             f"""
             QPushButton {{
@@ -931,7 +931,7 @@ class CalibrationView(QWidget):
         self._content_stack.setCurrentIndex(1)
         self._step_label.setText("STEP 2 OF 2  ·  BREATHING CALIBRATION")
         self._breath_label.setText("Press Start")
-        self._status_label.setText("Follow the orb to record your HRV baseline")
+        self._status_label.setText("Follow the orb to record HRV + pupil baselines")
         self._cta_btn.show()
         self._cta_btn.setEnabled(True)
         self._cta_btn.setText("  Start")
@@ -1074,13 +1074,29 @@ class CalibrationView(QWidget):
     # ------------------------------------------------------------------
 
     def _on_skip_calibration(self) -> None:
-        """Skip calibration and proceed directly to live session."""
-        self._prestart_timer.stop()
-        self._prestart_active = False
-        self._countdown_timer.stop()
-        if self._eye_preview:
-            self._eye_preview.stop()
+        """Skip pupil alignment only; keep baseline acquisition in breathing step."""
+        # If still on step 1, convert skip into a fast handoff to breathing baseline.
+        if self._step == "pupil_alignment" and not self._recording and not self._prestart_active:
+            self._show_breathing_step()
+            self._start_prestart_countdown()
+            logger.info("Calibration skip: moved from pupil alignment to breathing baseline.")
+            return
 
+        # If already on breathing but baseline has not started yet, start immediately.
+        if self._step == "breathing" and not self._recording and not self._prestart_active:
+            self._start_prestart_countdown()
+            logger.info("Calibration skip: starting breathing baseline without delay.")
+            return
+
+        # If prestart countdown is active, fast-forward into active baseline recording.
+        if self._prestart_active and not self._recording:
+            self._prestart_timer.stop()
+            self._prestart_active = False
+            self._start_baseline()
+            logger.info("Calibration skip: prestart countdown fast-forwarded to baseline start.")
+            return
+
+        # If baseline is currently recording, end it early and proceed.
         if self._session_manager is not None and self._recording:
             elapsed = CALIBRATION_DURATION_SECONDS - self._baseline_remaining
             try:
@@ -1089,6 +1105,12 @@ class CalibrationView(QWidget):
                 self._computed_pupil = pupil
             except Exception:
                 logger.exception("Failed to end calibration during skip.")
+
+        self._prestart_timer.stop()
+        self._prestart_active = False
+        self._countdown_timer.stop()
+        if self._eye_preview:
+            self._eye_preview.stop()
 
         self._recording = False
         self._complete = False

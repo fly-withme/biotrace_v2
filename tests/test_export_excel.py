@@ -55,8 +55,8 @@ def populated_session(db: DatabaseManager, session_id: int) -> int:
     cal_repo.save_pupil_samples_bulk(
         session_id,
         [
-            (1.0, 4.8, 4.9, 0.05),
-            (3.0, 5.0, 5.1, 0.10),
+            (1.0, 4.8, 4.9, 5.0),
+            (3.0, 5.0, 5.1, 10.0),
         ],
     )
     # One CLI sample
@@ -188,9 +188,9 @@ class TestMeasurementsSheet:
         out = tmp_path / "export.xlsx"
         SessionExporter(db).export_excel(populated_session, out)
         delta = self._col(openpyxl.load_workbook(out), "Delta Pupil Dilation [PDI]")
-        assert pytest.approx(delta[0], abs=0.001) == 0.05
+        assert pytest.approx(delta[0], abs=0.001) == 5.0
         assert delta[1] is None
-        assert pytest.approx(delta[2], abs=0.001) == 0.10
+        assert pytest.approx(delta[2], abs=0.001) == 10.0
 
     def test_measurements_times_are_absolute_timestamps(
         self, db: DatabaseManager, populated_session: int, tmp_path: Path
@@ -241,8 +241,8 @@ def ended_session(db: DatabaseManager) -> int:
     cal_repo.save_pupil_samples_bulk(
         sid,
         [
-            (1.0, 4.8, 4.9, 0.10),
-            (2.0, 5.0, 5.1, 0.20),
+            (1.0, 4.8, 4.9, 10.0),
+            (2.0, 5.0, 5.1, 20.0),
         ],
     )
     return sid
@@ -280,7 +280,7 @@ class TestSessionInfoEnrichment:
         SessionExporter(db).export_excel(ended_session, out)
         info = self._info_dict(openpyxl.load_workbook(out))
         assert pytest.approx(info["Average HRV (RMSSD)"], abs=0.001) == 33.8666666667
-        assert pytest.approx(info["Average Pupil Dilation Change (PDI)"], abs=0.001) == 0.15
+        assert pytest.approx(info["Average Pupil Dilation Change (PDI)"], abs=0.001) == 15.0
 
     def test_session_info_does_not_include_nasa_tlx(
         self, db: DatabaseManager, ended_session: int, tmp_path: Path

@@ -86,10 +86,10 @@ STRESS_NODES: list[NodeDef] = [
     NodeDef(
         icon="ph.arrows-down-up-fill",
         label="\u0394 Baseline",
-        formula="\u0394RMSSD = RMSSD_t \u2212 RMSSD_baseline",
+        formula="\u0394RMSSD% = ((RMSSD_t \u2212 RMSSD_baseline) / RMSSD_baseline) \u00d7 100",
         description=(
-            "We calculate the deviation from your resting baseline. Significant "
-            "drops in RMSSD indicate increased physiological stress."
+            "RMSSD change from baseline (%). Negative values indicate reduced "
+            "HRV versus baseline and higher stress tendency."
         ),
         reference="",
         is_threshold=True,
@@ -129,11 +129,10 @@ COGNITIVE_LOAD_NODES: list[NodeDef] = [
     ),
     NodeDef(
         icon="ph.drop-fill",
-        label="PDI",
-        formula="PDI = (d_t \u2212 d_baseline) / d_baseline",
+        label="Pupil % Change",
+        formula="\u0394pupil% = ((d_t \u2212 d_baseline) / d_baseline) \u00d7 100",
         description=(
-            "Pupil Dilation Index \u2014 the percentage change from your resting "
-            "pupil size baseline."
+            "Pupil change from baseline (%) used for cognitive-load estimation."
         ),
         reference=(
             "Beatty, J. (1982). Task-evoked pupillary responses. "
@@ -143,7 +142,7 @@ COGNITIVE_LOAD_NODES: list[NodeDef] = [
     NodeDef(
         icon="ph.brain-fill",
         label="CLI",
-        formula="CLI = 0.5 \u00b7 Stress + 0.5 \u00b7 PDI",
+        formula="CLI = 0.5 \u00b7 Stress + 0.5 \u00b7 Pupil\u0394%",
         description=(
             "Cognitive Load Index \u2014 a composite metric combining physical stress "
             "and mental effort into a single 0\u20131 scale."
@@ -470,12 +469,12 @@ class SettingsView(QWidget):
         # Vertical stack of cards
         stress_card = FlowchartCard(
             "Stress Analysis Pipeline",
-            "Measuring physiological tension via Heart Rate Variability (RMSSD)",
+            "Relative stress indicator from RMSSD change versus baseline (%)",
             STRESS_NODES,
         )
         cload_card = FlowchartCard(
             "Cognitive Load Pipeline",
-            "Combining Pupil Dilation Index (PDI) and Stress into a unified index",
+            "Relative cognitive-load indicator from pupil change versus baseline (%)",
             COGNITIVE_LOAD_NODES,
         )
         lcurve_card = FlowchartCard(

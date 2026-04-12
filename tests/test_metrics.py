@@ -9,7 +9,8 @@ import pytest
 
 from app.core.metrics import (
     compute_rmssd, 
-    compute_pdi, 
+    compute_pdi,
+    compute_pupil_pct_change,
     compute_cli, 
     normalize, 
     average_pupil_diameter
@@ -40,16 +41,19 @@ class TestPDI:
         assert compute_pdi(100.0, 100.0) == pytest.approx(0.0)
 
     def test_positive_when_dilated(self) -> None:
-        assert compute_pdi(120.0, 100.0) == pytest.approx(0.2)
+        assert compute_pdi(120.0, 100.0) == pytest.approx(20.0)
 
     def test_negative_when_constricted(self) -> None:
-        assert compute_pdi(80.0, 100.0) == pytest.approx(-0.2)
+        assert compute_pdi(80.0, 100.0) == pytest.approx(-20.0)
 
     def test_zero_baseline_guard(self) -> None:
-        assert compute_pdi(100.0, 0.0) == 0.0
+        assert compute_pdi(100.0, 0.0) is None
 
     def test_negative_baseline_guard(self) -> None:
-        assert compute_pdi(100.0, -1.0) == 0.0
+        assert compute_pdi(100.0, -1.0) is None
+
+    def test_named_pupil_pct_change_function_matches_alias(self) -> None:
+        assert compute_pupil_pct_change(120.0, 100.0) == pytest.approx(20.0)
 
 
 class TestAveragePupil:

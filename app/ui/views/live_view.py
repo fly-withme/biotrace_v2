@@ -21,7 +21,6 @@ Dependency injection: call ``bind_session_manager()`` once after construction.
 """
 
 import time
-from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -81,13 +80,10 @@ from app.ui.widgets.metric_card import MetricCard
 from app.ui.widgets.video_feed import VideoFeed
 from app.utils.config import (
     CAMERA_INDEX,
+    COGNITIVE_LOAD_MAX_PUPIL_PCT,
     STRESS_RMSSD_HIGH_DROP_PCT,
     STRESS_RMSSD_LOW_DROP_PCT,
     USE_EYE_TRACKER,
-    WORKLOAD_PUPIL_ROLLING_SECONDS,
-    WORKLOAD_PUPIL_SMOOTHING_SECONDS,
-    WORKLOAD_STATE_PERSIST_SECONDS,
-    WORKLOAD_THRESHOLD_FACTOR,
 )
 from app.utils.config import VIDEO_RECORDINGS_DIR
 from app.utils.logger import get_logger
@@ -232,14 +228,11 @@ class LiveView(QWidget):
         self._recording_path: Path | None = None
         self._current_camera_index: int = CAMERA_INDEX
         self._has_pupil_baseline: bool = False  # True once calibration sets a baseline
+        self._baseline_pupil_px: float = 0.0
+        self._runtime_pupil_baseline_px: float | None = None
         self._baseline_rmssd: float = 0.0
         self._live_error_count: int = 0
         self._rmssd_history: list[float] = []
-        self._pupil_smoothing_window: deque[tuple[float, float]] = deque()
-        self._pupil_rolling_window: deque[tuple[float, float]] = deque()
-        self._workload_state_is_elevated: bool = False
-        self._pending_workload_state: bool | None = None
-        self._pending_workload_since: float | None = None
         self._clock_timer = QTimer(self)
         self._clock_timer.setInterval(1000)
         self._clock_timer.timeout.connect(self._tick_clock)
@@ -605,8 +598,8 @@ class LiveView(QWidget):
         bottom_row.setSpacing(SPACE_2)
 
         self._pupil_card = MetricCard(
-            name="PUPIL DILATION",
-            unit="%",
+            name="PUPIL CHANGE",
+            unit="px",
             decimals=1,
         )
         self._bpm_card = MetricCard(
@@ -616,8 +609,8 @@ class LiveView(QWidget):
             window_seconds=60.0,
         )
         self._rmssd_card = MetricCard(
-            name="HRV (RMSSD)",
-            unit="%",
+            name="RMSSD CHANGE",
+            unit="ms",
             decimals=1,
             window_seconds=60.0,
         )
@@ -931,9 +924,13 @@ class LiveView(QWidget):
             rmssd: RMSSD in milliseconds.
             timestamp: Unix timestamp of the sample.
         """
-        self._rmssd_card.set_value(self._compute_rmssd_change_percent(rmssd), timestamp)
+        display_value, display_unit = self._compute_rmssd_display(rmssd)
+        self._rmssd_card.set_unit(display_unit)
+        self._rmssd_card.set_value(display_value, timestamp)
 
-        stress_value, stress_label = self._compute_stress_state(rmssd)
+        stress_value, stress_label = self._compute_stress_state(
+            hrv_pct_change=display_value if display_unit == "%" else None
+        )
         self._stress_gauge.set_value(stress_value, stress_label)
         self._cam_stress_bar.set_value(stress_value)
         self._cam_stress_value.setText(stress_label)
@@ -944,42 +941,49 @@ class LiveView(QWidget):
 
     @pyqtSlot(float, float)
     def on_pdi_updated(self, pdi: float, timestamp: float) -> None:
-        """Receive PDI update and display it as percentage change.
+        """Receive PDI update and refresh pupil/workload state.
 
         Args:
-            pdi: Pupil Dilation Index expressed as a ratio from baseline.
+            pdi: Pupil % change from baseline when calibrated, otherwise raw diameter.
             timestamp: Unix timestamp of the sample.
         """
-        self._pupil_card.set_value(pdi * 100.0, timestamp)
+        if self._has_pupil_baseline:
+            pupil_pct_change = pdi
+            self._pupil_card.set_unit("%")
+            self._pupil_card.set_value(abs(pupil_pct_change), timestamp)
+            workload_value, workload_label = self._compute_cognitive_load_state(pupil_pct_change)
+        else:
+            self._pupil_card.set_unit("px")
+            self._pupil_card.set_value(pdi, timestamp)
+            # No calibration baseline: bootstrap a temporary session baseline
+            # from the first valid raw diameter so we can still show % change.
+            if pdi > 0.0 and self._runtime_pupil_baseline_px is None:
+                self._runtime_pupil_baseline_px = pdi
 
-        if not self._has_pupil_baseline:
-            return
+            if self._runtime_pupil_baseline_px and self._runtime_pupil_baseline_px > 0.0:
+                pupil_pct_change = (
+                    (pdi - self._runtime_pupil_baseline_px)
+                    / self._runtime_pupil_baseline_px
+                ) * 100.0
+                workload_value, workload_label = self._compute_cognitive_load_state(pupil_pct_change)
+            else:
+                workload_value, workload_label = 0.0, "—"
 
-        smoothed_pdi = self._append_window_value(
-            self._pupil_smoothing_window,
-            timestamp,
-            pdi,
-            WORKLOAD_PUPIL_SMOOTHING_SECONDS,
-        )
-        rolling_mean = self._append_window_value(
-            self._pupil_rolling_window,
-            timestamp,
-            smoothed_pdi,
-            WORKLOAD_PUPIL_ROLLING_SECONDS,
-        )
-        threshold = rolling_mean * WORKLOAD_THRESHOLD_FACTOR
-        self._update_adaptive_workload_state(smoothed_pdi, threshold, timestamp)
+        self._workload_gauge.set_value(workload_value, workload_label)
+        self._cam_workload_bar.set_value(workload_value)
+        self._cam_workload_value.setText(workload_label)
 
-        self._timeline_chart.append("PUPIL", timestamp, smoothed_pdi)
-        self._timeline_chart.append("THRESHOLD", timestamp, threshold)
+        if self._has_pupil_baseline:
+            self._timeline_chart.append("PUPIL", timestamp, pdi)
 
     @pyqtSlot(float, float)
     def _on_calibration_complete(self, baseline_rmssd: float, baseline_pupil_px: float) -> None:
         """Record whether a valid pupil baseline was established."""
         self._baseline_rmssd = baseline_rmssd
+        self._baseline_pupil_px = baseline_pupil_px
         self._has_pupil_baseline = baseline_pupil_px > 0.0
-        self._pupil_card.set_unit("%")
-        self._rmssd_card.set_unit("%")
+        self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
+        self._rmssd_card.set_unit("%" if self._baseline_rmssd > 0.0 else "ms")
         logger.info(
             "LiveView: calibration complete — RMSSD baseline %.2f ms, pupil baseline %.2f px (has_baseline=%s).",
             baseline_rmssd, baseline_pupil_px, self._has_pupil_baseline,
@@ -989,8 +993,8 @@ class LiveView(QWidget):
     def on_cli_updated(self, cli: float, timestamp: float) -> None:
         """Receive CLI update.
 
-        The live dashboard now uses adaptive pupil-threshold classification
-        instead of fixed CLI cutoffs, so this slot remains intentionally inert.
+        The live dashboard derives cognitive load directly from pupil dilation,
+        so this slot remains intentionally inert.
         """
         _ = (cli, timestamp)
 
@@ -1029,6 +1033,7 @@ class LiveView(QWidget):
         self._set_badge_status(self._eye_badge, "ph.eye-fill", connected)
         if not connected:
             self._pupil_card.reset()
+            self._runtime_pupil_baseline_px = None
             self._reset_workload_state()
 
     # ------------------------------------------------------------------
@@ -1046,8 +1051,8 @@ class LiveView(QWidget):
             self._error_rate_card,
         ):
             card.reset()
-        self._pupil_card.set_unit("%")
-        self._rmssd_card.set_unit("%")
+        self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
+        self._rmssd_card.set_unit("%" if self._baseline_rmssd > 0.0 else "ms")
         self._error_rate_card.set_unit("/min")
 
         self._reset_workload_state()
@@ -1057,13 +1062,14 @@ class LiveView(QWidget):
         self._cam_bpm_lbl.setText("—")
 
         self._timeline_chart.clear_all()
+        self._runtime_pupil_baseline_px = None
 
-    def _compute_rmssd_change_percent(self, rmssd: float) -> float:
-        """Express RMSSD as percentage change from the baseline when available."""
+    def _compute_rmssd_display(self, rmssd: float) -> tuple[float, str]:
+        """Return the live RMSSD value and its display unit."""
         if self._baseline_rmssd > 0.0:
-            return ((rmssd - self._baseline_rmssd) / self._baseline_rmssd) * 100.0
+            return ((rmssd - self._baseline_rmssd) / self._baseline_rmssd) * 100.0, "%"
 
-        return max(0.0, min(100.0, ((rmssd - 20.0) / 60.0) * 100.0))
+        return rmssd, "ms"
 
     def _refresh_error_rate_card(self) -> None:
         """Update the live wall-contact rate based on elapsed session time."""
@@ -1093,71 +1099,39 @@ class LiveView(QWidget):
 
         return float((z_scores[-1] - z_min) / (z_max - z_min))
 
-    def _compute_stress_state(self, rmssd: float) -> tuple[float, str]:
-        """Map RMSSD change from baseline into a stress severity gauge."""
-        if self._baseline_rmssd > 0.0:
-            delta_pct = ((rmssd - self._baseline_rmssd) / self._baseline_rmssd) * 100.0
-            if delta_pct >= STRESS_RMSSD_LOW_DROP_PCT:
+    def _compute_stress_state(self, hrv_pct_change: float | None) -> tuple[float, str]:
+        """Map RMSSD % change from baseline into a stress severity gauge."""
+        if hrv_pct_change is not None:
+            if hrv_pct_change >= STRESS_RMSSD_LOW_DROP_PCT:
                 stress_value = 0.2
-            elif delta_pct >= STRESS_RMSSD_HIGH_DROP_PCT:
-                severity = (STRESS_RMSSD_LOW_DROP_PCT - delta_pct) / (
+            elif hrv_pct_change >= STRESS_RMSSD_HIGH_DROP_PCT:
+                severity = (STRESS_RMSSD_LOW_DROP_PCT - hrv_pct_change) / (
                     STRESS_RMSSD_LOW_DROP_PCT - STRESS_RMSSD_HIGH_DROP_PCT
                 )
                 stress_value = 0.2 + severity * 0.6
             else:
                 stress_value = 1.0
-            return float(max(0.0, min(1.0, stress_value))), f"{delta_pct:.0f}%"
+            return (
+                float(max(0.0, min(1.0, stress_value))),
+                f"{hrv_pct_change:.0f}%",
+            )
 
-        hrv_pct = max(0.0, min(100.0, ((rmssd - 20.0) / 60.0) * 100.0))
-        stress_pct = 100.0 - hrv_pct
-        return stress_pct / 100.0, f"{stress_pct:.0f}%"
+        return 0.0, "—"
 
-    @staticmethod
-    def _append_window_value(
-        buffer: deque[tuple[float, float]],
-        timestamp: float,
-        value: float,
-        window_seconds: float,
-    ) -> float:
-        """Append a timestamped value and return the rolling mean over the window."""
-        buffer.append((timestamp, value))
-        cutoff = timestamp - window_seconds
-        while buffer and buffer[0][0] < cutoff:
-            buffer.popleft()
-        return float(sum(sample for _, sample in buffer) / len(buffer))
+    def _compute_cognitive_load_state(self, pupil_pct_change: float) -> tuple[float, str]:
+        """Map magnitude of pupil % change to cognitive-load donut fill."""
+        if COGNITIVE_LOAD_MAX_PUPIL_PCT <= 0.0:
+            return 0.0, "—"
 
-    def _update_adaptive_workload_state(
-        self,
-        smoothed_pdi: float,
-        threshold: float,
-        timestamp: float,
-    ) -> None:
-        """Classify workload relative to a rolling pupil threshold."""
-        target_state = smoothed_pdi > threshold
-
-        if self._pending_workload_state != target_state:
-            self._pending_workload_state = target_state
-            self._pending_workload_since = timestamp
-
-        if (
-            self._pending_workload_since is not None
-            and timestamp - self._pending_workload_since >= WORKLOAD_STATE_PERSIST_SECONDS
-        ):
-            self._workload_state_is_elevated = target_state
-
-        gauge_value = 0.8 if self._workload_state_is_elevated else 0.3
-        gauge_label = "HIGH" if self._workload_state_is_elevated else "LOW"
-        self._workload_gauge.set_value(gauge_value, gauge_label)
-        self._cam_workload_bar.set_value(gauge_value)
-        self._cam_workload_value.setText(gauge_label)
+        load_driver_pct = abs(pupil_pct_change)
+        load_pct = max(
+            0.0,
+            min(100.0, (load_driver_pct / COGNITIVE_LOAD_MAX_PUPIL_PCT) * 100.0),
+        )
+        return load_pct / 100.0, f"{load_pct:.0f}%"
 
     def _reset_workload_state(self) -> None:
-        """Clear adaptive workload state between sessions or on disconnect."""
-        self._pupil_smoothing_window.clear()
-        self._pupil_rolling_window.clear()
-        self._workload_state_is_elevated = False
-        self._pending_workload_state = None
-        self._pending_workload_since = None
+        """Clear cognitive-load state between sessions or on disconnect."""
         self._workload_gauge.set_value(0.0, "—")
         self._cam_workload_bar.set_value(0.0)
         self._cam_workload_value.setText("—")
@@ -1285,10 +1259,11 @@ class LiveView(QWidget):
             baseline_pupil_px = float(getattr(self._session_manager, "baseline_pupil_px", 0.0) or 0.0)
             baseline_rmssd = float(getattr(self._session_manager, "baseline_rmssd", 0.0) or 0.0)
 
+        self._baseline_pupil_px = baseline_pupil_px
         self._baseline_rmssd = baseline_rmssd
         self._has_pupil_baseline = baseline_pupil_px > 0.0
-        self._pupil_card.set_unit("%")
-        self._rmssd_card.set_unit("%")
+        self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
+        self._rmssd_card.set_unit("%" if self._baseline_rmssd > 0.0 else "ms")
 
     @staticmethod
     def _make_card() -> QFrame:

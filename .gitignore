@@ -2,3 +2,6 @@ recordings/
 biotrace.log
 .venv/
 **/__pycache__/
+# Local runtime artifacts
+biotrace.db
+sessions/
