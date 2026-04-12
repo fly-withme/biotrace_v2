@@ -71,8 +71,8 @@ CARD_TITLE_FONT_SIZE = FONT_HEADING_2 - 4
 class PostSessionView(QWidget):
     """Individual session dashboard shown after a session ends or when opened from history.
 
-    Shows session date/title, three summary metric cards (performance, time,
-    error rate), a biometric timeline chart with series toggle, and a video
+    Shows session date/title, four summary metric cards (session duration,
+    errors, max stress, max cognitive load), a biometric timeline chart with series toggle, and a video
     playback area.
 
     User flow
@@ -96,9 +96,10 @@ class PostSessionView(QWidget):
         self._exporter = SessionExporter(db)
         self._session_repo = SessionRepository(db)
         
-        self._perf_gauge: DonutGauge | None = None
-        self._time_gauge: DonutGauge | None = None
-        self._err_gauge: DonutGauge | None = None
+        self._duration_gauge: DonutGauge | None = None
+        self._errors_gauge: DonutGauge | None = None
+        self._max_stress_gauge: DonutGauge | None = None
+        self._max_cli_gauge: DonutGauge | None = None
         self._start_session_btn: QPushButton | None = None
         self._export_btn: QPushButton | None = None
 
@@ -163,33 +164,8 @@ class PostSessionView(QWidget):
             except Exception:
                 self._title_label.setText("Session —")
 
-        # ── TOTAL TIME card ────────────────────────────────────────────
-        try:
-            started_at = datetime.fromisoformat(str(session["started_at"]))
-            ended_at   = datetime.fromisoformat(str(session["ended_at"]))
-            total_s = int((ended_at - started_at).total_seconds())
-            m, s = divmod(total_s, 60)
-            if self._time_gauge:
-                self._time_gauge.set_value(1.0, f"{m}:{s:02d}")
-        except Exception:
-            if self._time_gauge:
-                self._time_gauge.set_value(0.0, "—")
-
-        # ── PERFORMANCE card ───────────────────────────────────────────
-        # Stub: will be wired to real score in Phase 7.
-        if self._perf_gauge:
-            self._perf_gauge.set_value(0.84, "84%")
-
-        # ── ERROR RATE card ────────────────────────────────────────────
-        err_count = session["error_count"]
-        if err_count is not None:
-            # Normalization stub for gauge: assume 0-10 errors range for now
-            val = min(1.0, float(err_count) / 10.0)
-            if self._err_gauge:
-                self._err_gauge.set_value(val, str(err_count))
-        else:
-            if self._err_gauge:
-                self._err_gauge.set_value(0.0, "—")
+        duration_s = self._compute_session_duration_seconds(session["started_at"], session["ended_at"])
+        self._set_metric_cards(session_id, duration_s, session["error_count"])
 
         # ── Timeline Data ──────────────────────────────────────────────
         self._timeline_chart.load_session(self._db, session_id)
@@ -380,18 +356,21 @@ class PostSessionView(QWidget):
         self._rename_btn.show()
 
     def _build_metric_cards(self) -> QHBoxLayout:
-        """Build the three summary metric cards (performance, total time, error rate)."""
+        """Build the four summary metric cards for this individual session."""
         row = QHBoxLayout()
         row.setSpacing(GRID_GUTTER)
 
-        self._perf_gauge = self._add_metric_card(
-            row, "PERFORMANCE", COLOR_PRIMARY, COLOR_PRIMARY_SUBTLE
+        self._duration_gauge = self._add_metric_card(
+            row, "SESSION DURATION", COLOR_PRIMARY, COLOR_PRIMARY_SUBTLE
         )
-        self._time_gauge = self._add_metric_card(
-            row, "TOTAL TIME", COLOR_WARNING, COLOR_WARNING_BG
+        self._errors_gauge = self._add_metric_card(
+            row, "NUMBER OF ERRORS", COLOR_DANGER, COLOR_DANGER_BG
         )
-        self._err_gauge = self._add_metric_card(
-            row, "ERROR RATE", COLOR_DANGER, COLOR_DANGER_BG
+        self._max_stress_gauge = self._add_metric_card(
+            row, "MAX STRESS", COLOR_PRIMARY, COLOR_PRIMARY_SUBTLE
+        )
+        self._max_cli_gauge = self._add_metric_card(
+            row, "MAX COGNITIVE LOAD", COLOR_WARNING, COLOR_WARNING_BG
         )
 
         return row
@@ -514,3 +493,97 @@ class PostSessionView(QWidget):
     def _build_video_area(self) -> QWidget:
         """Return the video player widget."""
         return self._video_player
+
+    def _compute_session_duration_seconds(
+        self, started_at_raw: str | None, ended_at_raw: str | None
+    ) -> int | None:
+        """Return non-negative session duration in seconds, or None when unavailable."""
+        if not started_at_raw or not ended_at_raw:
+            return None
+        try:
+            started_at = datetime.fromisoformat(str(started_at_raw))
+            ended_at = datetime.fromisoformat(str(ended_at_raw))
+        except Exception:
+            return None
+        duration_s = int((ended_at - started_at).total_seconds())
+        if duration_s < 0:
+            return None
+        return duration_s
+
+    def _format_duration(self, seconds: int) -> str:
+        """Format seconds as M:SS (or H:MM:SS when >= 1h)."""
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        if h > 0:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m}:{s:02d}"
+
+    def _query_max_stress_percent(self, session_id: int) -> float | None:
+        """Compute max stress (%) for a session from RMSSD against baseline/mean reference."""
+        conn = self._db.get_connection()
+        cal_row = conn.execute(
+            "SELECT baseline_rmssd FROM calibrations "
+            "WHERE session_id = ? AND baseline_rmssd IS NOT NULL "
+            "ORDER BY id ASC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        baseline_rmssd = float(cal_row[0]) if cal_row and cal_row[0] is not None else None
+
+        rows = conn.execute(
+            "SELECT rmssd FROM hrv_samples "
+            "WHERE session_id = ? AND rmssd IS NOT NULL",
+            (session_id,),
+        ).fetchall()
+        if not rows:
+            return None
+
+        rmssd_vals = [float(r["rmssd"]) for r in rows]
+        if baseline_rmssd is not None and baseline_rmssd > 0:
+            ref = baseline_rmssd
+        else:
+            ref = float(sum(rmssd_vals) / len(rmssd_vals))
+            if ref <= 0:
+                return None
+
+        stress_series = [max(0.0, (ref - value) / ref * 100.0) for value in rmssd_vals]
+        return max(stress_series) if stress_series else None
+
+    def _query_max_cli(self, session_id: int) -> float | None:
+        """Return max CLI in [0.0, 1.0] for a session."""
+        conn = self._db.get_connection()
+        row = conn.execute(
+            "SELECT MAX(cli) AS max_cli FROM cli_samples WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None or row["max_cli"] is None:
+            return None
+        return max(0.0, min(1.0, float(row["max_cli"])))
+
+    def _set_metric_cards(self, session_id: int, duration_s: int | None, error_count: int | None) -> None:
+        """Populate all issue-21 metric cards from session data."""
+        if self._duration_gauge:
+            if duration_s is None:
+                self._duration_gauge.set_value(0.0, "—")
+            else:
+                self._duration_gauge.set_value(min(1.0, duration_s / 3600.0), self._format_duration(duration_s))
+
+        err_val = int(error_count) if error_count is not None else 0
+        if self._errors_gauge:
+            self._errors_gauge.set_value(min(1.0, err_val / 20.0), str(err_val))
+
+        max_stress_pct = self._query_max_stress_percent(session_id)
+        if self._max_stress_gauge:
+            if max_stress_pct is None:
+                self._max_stress_gauge.set_value(0.0, "—")
+            else:
+                self._max_stress_gauge.set_value(
+                    min(1.0, max_stress_pct / 100.0),
+                    f"{max_stress_pct:.0f}%",
+                )
+
+        max_cli = self._query_max_cli(session_id)
+        if self._max_cli_gauge:
+            if max_cli is None:
+                self._max_cli_gauge.set_value(0.0, "—")
+            else:
+                self._max_cli_gauge.set_value(max_cli, f"{max_cli * 100:.0f}%")

@@ -70,13 +70,17 @@ class DataStore:
         session_id: The database ID of the currently active session, set
                     externally once the session row is created.
         baseline_rmssd: Resting RMSSD from calibration (milliseconds).
+        baseline_rmssd_std: Standard deviation of RMSSD in calibration (milliseconds).
         baseline_pupil_px: Resting pupil diameter from calibration (pixels).
+        baseline_pupil_px_std: Standard deviation of pupil diameter in calibration (pixels).
     """
 
     def __init__(self) -> None:
         self.session_id: int | None = None
         self.baseline_rmssd: float = 0.0
+        self.baseline_rmssd_std: float = 0.0
         self.baseline_pupil_px: float = 0.0
+        self.baseline_pupil_px_std: float = 0.0
 
         self._hrv: deque[HRVSample] = deque(maxlen=_MAX_HRV_SAMPLES)
         self._pupil: deque[PupilSample] = deque(maxlen=_MAX_PUPIL_SAMPLES)

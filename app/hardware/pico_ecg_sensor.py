@@ -66,6 +66,8 @@ from app.utils.config import (
     PICO_RPEAK_AMPLITUDE_WINDOW,
     PICO_RPEAK_REFRACTORY_SAMPLES,
     PICO_RPEAK_THRESHOLD_FACTOR,
+    PICO_WALL_CONTACT_MIN_EVENT_INTERVAL_SECONDS,
+    PICO_WALL_CONTACT_LOG_THROTTLE_SECONDS,
 )
 from app.utils.logger import get_logger
 
@@ -264,6 +266,8 @@ class _SerialWorker(QThread):
         self._detector = _RPeakDetector()
         self._moi_states: dict[str, bool] = {}
         self._moi_seen = False
+        self._last_wall_contact_event_ts: float = 0.0
+        self._last_wall_contact_log_ts: float = 0.0
 
     def request_stop(self) -> None:
         """Signal the read loop to exit on next iteration."""
@@ -275,6 +279,8 @@ class _SerialWorker(QThread):
         self._detector.reset()
         self._moi_states.clear()
         self._moi_seen = False
+        self._last_wall_contact_event_ts = 0.0
+        self._last_wall_contact_log_ts = 0.0
 
         import os
         if not os.path.exists(self._port):
@@ -389,10 +395,22 @@ class _SerialWorker(QThread):
                 rising_channels.append(channel)
 
         if rising_channels:
-            logger.info(
-                "Pico wall contact detected on %s.",
-                ", ".join(sorted(rising_channels)),
-            )
+            now = time.time()
+            if now - self._last_wall_contact_event_ts < PICO_WALL_CONTACT_MIN_EVENT_INTERVAL_SECONDS:
+                return False
+            self._last_wall_contact_event_ts = now
+
+            if now - self._last_wall_contact_log_ts >= PICO_WALL_CONTACT_LOG_THROTTLE_SECONDS:
+                logger.info(
+                    "Pico wall contact detected on %s.",
+                    ", ".join(sorted(rising_channels)),
+                )
+                self._last_wall_contact_log_ts = now
+            else:
+                logger.debug(
+                    "Pico wall contact detected on %s (throttled).",
+                    ", ".join(sorted(rising_channels)),
+                )
             return True
         return False
 

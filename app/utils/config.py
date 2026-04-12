@@ -86,7 +86,10 @@ PUPIL_BLINK_VELOCITY_THRESHOLD_PX: float = 20.0
 PUPIL_PDI_OUTLIER_CLAMP: float = 0.40
 
 # Calibration baseline recording duration (seconds).
-CALIBRATION_DURATION_SECONDS: int = 60
+CALIBRATION_DURATION_SECONDS: int = 20
+
+# Minimum RR intervals required for accepting an RMSSD calibration baseline.
+CALIBRATION_MIN_RR_INTERVALS: int = 30
 
 # ---------------------------------------------------------------------------
 # Cognitive Load Index (CLI)
@@ -106,6 +109,13 @@ WORKLOAD_PUPIL_SMOOTHING_SECONDS: float = 1.0
 WORKLOAD_PUPIL_ROLLING_SECONDS: float = 30.0
 WORKLOAD_THRESHOLD_FACTOR: float = 0.997
 WORKLOAD_STATE_PERSIST_SECONDS: float = 0.2
+
+# Minimum time between two accepted hardware error events (wire contacts).
+ERROR_EVENT_DEBOUNCE_SECONDS: float = 0.5
+
+# Pi Pico wall-contact flood protection.
+PICO_WALL_CONTACT_MIN_EVENT_INTERVAL_SECONDS: float = 0.5
+PICO_WALL_CONTACT_LOG_THROTTLE_SECONDS: float = 5.0
 
 # ---------------------------------------------------------------------------
 # Mock Sensor — development / testing

@@ -16,6 +16,7 @@ from app.utils.config import EYE_TRACKER_CAMERA_INDEX
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+_FALLBACK_NOTICE_LOGGED: bool = False
 
 
 class _PupilWorker(QThread):
@@ -58,7 +59,10 @@ class _PupilWorker(QThread):
             import pypupilext as pp  # type: ignore
             detector = pp.PuRe()
         except ImportError:
-            logger.warning("pypupilext not found. Using simple OpenCV fallback for pupil detection.")
+            global _FALLBACK_NOTICE_LOGGED
+            if not _FALLBACK_NOTICE_LOGGED:
+                logger.info("pypupilext not found. Using simple OpenCV fallback for pupil detection.")
+                _FALLBACK_NOTICE_LOGGED = True
             class DummyPupil:
                 def __init__(self, cx, cy, diameter, is_valid):
                     self.center = (cx, cy)

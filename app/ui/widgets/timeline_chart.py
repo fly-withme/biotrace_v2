@@ -20,7 +20,7 @@ A hover hairline follows the mouse cursor.
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QSizePolicy, QVBoxLayout, QWidget
 
 from app.storage.database import DatabaseManager
 from app.ui.theme import (
@@ -177,9 +177,14 @@ class TimelineChart(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.scenePos()
             if self._plot_item.sceneBoundingRect().contains(pos):
-                mouse_point = self._plot_item.vb.mapSceneToView(pos)
-                timestamp_s = mouse_point.x()
-                self.timestamp_clicked.emit(max(0.0, timestamp_s * 1000.0))
+                self._seek_to_scene_pos(pos)
+
+    def _seek_to_scene_pos(self, scene_pos) -> None:
+        """Map a scene position to a timestamp, update playhead, and emit seek signal."""
+        mouse_point = self._plot_item.vb.mapSceneToView(scene_pos)
+        timestamp_ms = max(0.0, float(mouse_point.x()) * 1000.0)
+        self.set_playhead_ms(timestamp_ms)
+        self.timestamp_clicked.emit(timestamp_ms)
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -256,6 +261,9 @@ class TimelineChart(QWidget):
             if self._plot_item.sceneBoundingRect().contains(pos):
                 mouse_point = self._plot_item.vb.mapSceneToView(pos)
                 self._v_line.setPos(mouse_point.x())
+                # Click-and-drag seek support.
+                if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+                    self._seek_to_scene_pos(pos)
 
         self._proxy = pg.SignalProxy(
             self._plot_item.scene().sigMouseMoved, rateLimit=60, slot=_mouse_moved

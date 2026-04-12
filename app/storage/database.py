@@ -42,7 +42,9 @@ CREATE TABLE IF NOT EXISTS calibrations (
     recorded_at         DATETIME NOT NULL,
     duration_seconds    INTEGER NOT NULL,       -- actual recording length
     baseline_rmssd      REAL,                   -- ms — resting HRV baseline
-    baseline_pupil_mm   REAL                    -- camera units (px) — resting pupil diameter baseline
+    baseline_rmssd_std  REAL,                   -- ms — RMSSD baseline standard deviation
+    baseline_pupil_mm   REAL,                   -- camera units (px) — resting pupil diameter baseline
+    baseline_pupil_std  REAL                    -- camera units (px) — pupil baseline standard deviation
 );
 
 CREATE TABLE IF NOT EXISTS hrv_samples (
@@ -111,6 +113,8 @@ _MIGRATIONS: list[str] = [
     "ALTER TABLE sessions     ADD COLUMN error_count  INTEGER",
     "ALTER TABLE sessions     ADD COLUMN video_path   TEXT",
     "ALTER TABLE pupil_samples ADD COLUMN delta_pdi   REAL",
+    "ALTER TABLE calibrations ADD COLUMN baseline_rmssd_std REAL",
+    "ALTER TABLE calibrations ADD COLUMN baseline_pupil_std REAL",
 ]
 
 

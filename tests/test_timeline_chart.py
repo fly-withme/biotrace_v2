@@ -36,7 +36,7 @@ class TestTimelineChart:
         
         # Add some samples
         cal_repo.save_hrv_samples_bulk(sid, [(0.0, 800.0, 40.0, 75.0, 0.0), (1.0, 820.0, 42.0, 73.0, 2.0)])
-        cal_repo.save_cli_samples_bulk(sid, [(0.5, 0.3), (1.5, 0.4)])
+        cal_repo.save_pupil_samples_bulk(sid, [(0.5, 120.0, 0.0, 0.10), (1.5, 121.0, 0.0, 0.20)])
         
         chart.load_session(db, sid)
         
@@ -45,7 +45,7 @@ class TestTimelineChart:
         
         # Verify curves have data
         assert len(chart._stress_curve.xData) == 2
-        assert len(chart._cli_curve.xData) == 2
+        assert len(chart._pupil_curve.xData) == 2
 
     def test_load_session_empty_data_shows_placeholder(self, chart: TimelineChart, db: DatabaseManager) -> None:
         repo = SessionRepository(db)

@@ -22,6 +22,7 @@ Recording support::
 """
 
 import sys
+import threading
 import cv2
 import numpy as np
 from pathlib import Path
@@ -58,6 +59,8 @@ class _CameraWorker(QThread):
         self._record_target_path: str | None = None
         self._recording_enabled: bool = False
         self._writer: cv2.VideoWriter | None = None
+        self._camera_ready: bool = False
+        self._record_lock = threading.Lock()
 
     def run(self) -> None:
         """Capture loop — runs until ``stop()`` is called."""
@@ -73,7 +76,6 @@ class _CameraWorker(QThread):
             logger.error(msg)
             self.error_occurred.emit(msg)
             return
-
         # Reduce the internal buffer to 1 frame — on macOS/AVFoundation this
         # prevents the driver from delivering stale frames after initialization
         # and avoids the "opens but read() returns False" failure mode.
@@ -110,6 +112,7 @@ class _CameraWorker(QThread):
             cap.release()
             return
 
+        self._camera_ready = True
         logger.info("Camera %d opened successfully.", self._camera_index)
 
         _consecutive_failures = 0
@@ -131,8 +134,14 @@ class _CameraWorker(QThread):
             _consecutive_failures = 0
 
             self._sync_recording_state(cap, frame)
-            if self._writer is not None:
-                self._writer.write(frame)
+            with self._record_lock:
+                if self._writer is not None:
+                    try:
+                        self._writer.write(frame)
+                    except cv2.error as exc:
+                        logger.warning("Video encoder write failed, stopping recording: %s", exc)
+                        self._recording_enabled = False
+                        self._release_writer()
 
             # Offload BGR → RGB conversion to this worker thread.
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -147,8 +156,10 @@ class _CameraWorker(QThread):
             ).copy()
             self.frame_ready.emit(qt_image)
 
-        self._release_writer()
+        with self._record_lock:
+            self._release_writer()
         cap.release()
+        self._camera_ready = False
         logger.info("Camera %d released.", self._camera_index)
 
     def stop(self) -> None:
@@ -166,39 +177,48 @@ class _CameraWorker(QThread):
         Writer initialization is deferred until the next valid frame so we can
         match the frame size of the actual capture stream.
         """
-        self._record_target_path = output_path
-        self._recording_enabled = True
+        with self._record_lock:
+            self._record_target_path = output_path
+            self._recording_enabled = True
 
     def stop_recording(self) -> None:
         """Disable recording and release any active writer."""
-        self._recording_enabled = False
-        self._release_writer()
+        with self._record_lock:
+            self._recording_enabled = False
+            self._release_writer()
 
     @property
     def is_recording(self) -> bool:
         """Return whether recording has been enabled."""
-        return self._recording_enabled
+        with self._record_lock:
+            return self._recording_enabled
 
     def _sync_recording_state(self, cap: cv2.VideoCapture, frame: np.ndarray) -> None:
         """Start/stop writer lazily based on recording toggle state."""
-        if self._recording_enabled and self._writer is None and self._record_target_path is not None:
-            height, width = frame.shape[:2]
-            fps = float(cap.get(cv2.CAP_PROP_FPS))
-            if fps <= 0.0:
-                fps = VIDEO_RECORDING_FPS_FALLBACK
+        with self._record_lock:
+            if (
+                self._camera_ready
+                and self._recording_enabled
+                and self._writer is None
+                and self._record_target_path is not None
+            ):
+                height, width = frame.shape[:2]
+                fps = float(cap.get(cv2.CAP_PROP_FPS))
+                if fps <= 0.0:
+                    fps = VIDEO_RECORDING_FPS_FALLBACK
 
-            Path(self._record_target_path).parent.mkdir(parents=True, exist_ok=True)
-            fourcc = cv2.VideoWriter_fourcc(*VIDEO_RECORDING_FOURCC)
-            self._writer = cv2.VideoWriter(self._record_target_path, fourcc, fps, (width, height))
-            if not self._writer.isOpened():
-                logger.error("Cannot open video writer for %s", self._record_target_path)
-                self._writer = None
-                self._recording_enabled = False
-            else:
-                logger.info("Recording to %s (%.1f fps, %dx%d)", self._record_target_path, fps, width, height)
+                Path(self._record_target_path).parent.mkdir(parents=True, exist_ok=True)
+                fourcc = cv2.VideoWriter_fourcc(*VIDEO_RECORDING_FOURCC)
+                self._writer = cv2.VideoWriter(self._record_target_path, fourcc, fps, (width, height))
+                if not self._writer.isOpened():
+                    logger.error("Cannot open video writer for %s", self._record_target_path)
+                    self._writer = None
+                    self._recording_enabled = False
+                else:
+                    logger.info("Recording to %s (%.1f fps, %dx%d)", self._record_target_path, fps, width, height)
 
-        if not self._recording_enabled and self._writer is not None:
-            self._release_writer()
+            if not self._recording_enabled and self._writer is not None:
+                self._release_writer()
 
     def _release_writer(self) -> None:
         """Release writer if active."""

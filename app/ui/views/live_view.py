@@ -228,6 +228,11 @@ class LiveView(QWidget):
         self._session_id: int | None = None
         self._recording_path: Path | None = None
         self._current_camera_index: int = CAMERA_INDEX
+        self._baseline_rmssd: float = 0.0
+        self._baseline_rmssd_std: float = 0.0
+        self._baseline_pupil_px: float = 0.0
+        self._baseline_pupil_std: float = 0.0
+        self._timeline_std_fallback_warned: bool = False
         self._has_pupil_baseline: bool = False  # True once calibration sets a baseline
         self._bootstrap_pupil_samples: deque[tuple[float, float]] = deque()
         self._pupil_smoothing_window: deque[tuple[float, float]] = deque()
@@ -284,6 +289,10 @@ class LiveView(QWidget):
         session_manager.session_resumed.connect(self._on_session_resumed)
         session_manager.error_count_updated.connect(self.on_error_count_updated)
         self._sync_pupil_baseline_state()
+        logger.info(
+            "Live timeline normalization: z=(value-mean)/std from calibration baselines; "
+            "fallback to %% change when std is unavailable."
+        )
         logger.info("LiveView bound to SessionManager.")
 
     # ------------------------------------------------------------------
@@ -541,9 +550,9 @@ class LiveView(QWidget):
 
         # Legend dots
         for label_text, color in [
-            ("PUPIL %", _COLOR_PDI),
-            ("THRESHOLD", _COLOR_THRESHOLD),
-            ("HRV", _COLOR_RMSSD),
+            ("PUPIL z", _COLOR_PDI),
+            ("PUPIL THRESH z", _COLOR_THRESHOLD),
+            ("HRV z", _COLOR_RMSSD),
         ]:
             dot = QLabel("●")
             dot.setStyleSheet(f"color: {color}; font-size: 9px;")
@@ -559,8 +568,8 @@ class LiveView(QWidget):
         self._timeline_chart = LiveChart(
             series=["PUPIL", "THRESHOLD", "HRV"],
             colours=[_COLOR_PDI, _COLOR_THRESHOLD, _COLOR_RMSSD],
-            y_label="Change from baseline (%)",
-            y_range=(-50.0, 150.0),
+            y_label="Change from baseline (z-score)",
+            y_range=(-3.5, 3.5),
             window_seconds=180,
             pen_styles=[
                 Qt.PenStyle.SolidLine,
@@ -602,7 +611,7 @@ class LiveView(QWidget):
         )
         self._accuracy_card = MetricCard(
             name="ERROR RATE",
-            unit="",
+            unit="errors",
             decimals=0,
             show_sparkline=False,
         )
@@ -901,16 +910,31 @@ class LiveView(QWidget):
         """
         self._rmssd_card.set_value(rmssd, timestamp)
 
-        # Map RMSSD into both HRV and stress percentages using the same range.
-        # RMSSD 20 ms → 0 % HRV / 100 % stress, RMSSD 80 ms → 100 % HRV / 0 % stress.
-        hrv_pct = max(0.0, min(100.0, ((rmssd - 20.0) / 60.0) * 100.0))
-        stress_pct = 100.0 - hrv_pct
+        baseline_rmssd = self._baseline_rmssd
+        if baseline_rmssd <= 0.0 and self._session_manager is not None:
+            baseline_rmssd = float(getattr(self._session_manager, "baseline_rmssd", 0.0) or 0.0)
+            self._baseline_rmssd = baseline_rmssd
+
+        if baseline_rmssd > 0.0:
+            # RMSSD trend as % change from calibration baseline.
+            hrv_percent_change = ((rmssd - baseline_rmssd) / baseline_rmssd) * 100.0
+            # Higher stress when RMSSD drops below baseline.
+            stress_pct = max(0.0, min(100.0, -hrv_percent_change))
+        else:
+            # Fallback range when no calibration baseline exists yet.
+            hrv_percent_change = max(0.0, min(100.0, ((rmssd - 20.0) / 60.0) * 100.0))
+            stress_pct = 100.0 - hrv_percent_change
+
         self._stress_gauge.set_value(stress_pct / 100.0, f"{stress_pct:.0f}%")
         self._cam_stress_bar.set_value(stress_pct / 100.0)
         self._cam_stress_value.setText(f"{stress_pct:.0f}%")
-        
-        # Feed the timeline chart with HRV as %-like trend.
-        self._timeline_chart.append("HRV", timestamp, hrv_pct)
+
+        # Feed timeline with z-score if std is available; else fall back to % change.
+        hrv_timeline = self._zscore_or_none(rmssd, self._baseline_rmssd, self._baseline_rmssd_std)
+        if hrv_timeline is None:
+            hrv_timeline = hrv_percent_change
+            self._warn_timeline_std_fallback_once("HRV")
+        self._timeline_chart.append("HRV", timestamp, hrv_timeline)
 
     @pyqtSlot(float, float)
     def on_pdi_updated(self, pdi: float, timestamp: float) -> None:
@@ -964,12 +988,46 @@ class LiveView(QWidget):
         threshold = rolling_mean * WORKLOAD_THRESHOLD_FACTOR
         self._update_adaptive_workload_state(smoothed_pdi, threshold, timestamp)
 
-        self._timeline_chart.append("PUPIL", timestamp, smoothed_pdi * 100.0)
-        self._timeline_chart.append("THRESHOLD", timestamp, threshold * 100.0)
+        # Convert PDI ratio back to diameter for z-score normalization:
+        # pdi = (d - baseline) / baseline -> d = baseline * (1 + pdi)
+        baseline_pupil = self._baseline_pupil_px
+        if baseline_pupil <= 0.0 and self._session_manager is not None:
+            baseline_pupil = float(getattr(self._session_manager, "baseline_pupil_px", 0.0) or 0.0)
+            self._baseline_pupil_px = baseline_pupil
+
+        if baseline_pupil > 0.0:
+            pupil_diameter = baseline_pupil * (1.0 + smoothed_pdi)
+            threshold_diameter = baseline_pupil * (1.0 + threshold)
+            pupil_timeline = self._zscore_or_none(
+                pupil_diameter,
+                self._baseline_pupil_px,
+                self._baseline_pupil_std,
+            )
+            threshold_timeline = self._zscore_or_none(
+                threshold_diameter,
+                self._baseline_pupil_px,
+                self._baseline_pupil_std,
+            )
+            if pupil_timeline is None or threshold_timeline is None:
+                self._warn_timeline_std_fallback_once("PUPIL")
+                self._timeline_chart.append("PUPIL", timestamp, smoothed_pdi * 100.0)
+                self._timeline_chart.append("THRESHOLD", timestamp, threshold * 100.0)
+            else:
+                self._timeline_chart.append("PUPIL", timestamp, pupil_timeline)
+                self._timeline_chart.append("THRESHOLD", timestamp, threshold_timeline)
+        else:
+            self._warn_timeline_std_fallback_once("PUPIL")
+            self._timeline_chart.append("PUPIL", timestamp, smoothed_pdi * 100.0)
+            self._timeline_chart.append("THRESHOLD", timestamp, threshold * 100.0)
 
     @pyqtSlot(float, float)
     def _on_calibration_complete(self, _baseline_rmssd: float, baseline_pupil_px: float) -> None:
         """Record whether a valid pupil baseline was established."""
+        self._baseline_rmssd = float(_baseline_rmssd or 0.0)
+        if self._session_manager is not None:
+            self._baseline_rmssd_std = float(getattr(self._session_manager, "baseline_rmssd_std", 0.0) or 0.0)
+            self._baseline_pupil_std = float(getattr(self._session_manager, "baseline_pupil_std", 0.0) or 0.0)
+        self._baseline_pupil_px = float(baseline_pupil_px or 0.0)
         self._has_pupil_baseline = baseline_pupil_px > 0.0
         self._pupil_card.set_unit("%")
         logger.info(
@@ -1029,6 +1087,7 @@ class LiveView(QWidget):
 
     def _reset_widgets(self) -> None:
         """Clear all metric cards and charts before a new session."""
+        self._timeline_std_fallback_warned = False
         for card in (self._pupil_card, self._bpm_card, self._rmssd_card,
                      self._speed_card, self._accuracy_card):
             card.reset()
@@ -1193,7 +1252,7 @@ class LiveView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SPACE_1)
 
-        gauge = DonutGauge(value=0.0, accent_color=accent, track_color=track, center_text="—", size=180)
+        gauge = DonutGauge(value=0.0, accent_color=accent, track_color=track, center_text="—", size=148)
         layout.addWidget(gauge, alignment=Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
 
         title_lbl = QLabel(title)
@@ -1213,7 +1272,28 @@ class LiveView(QWidget):
             baseline_pupil_px = float(getattr(self._session_manager, "baseline_pupil_px", 0.0) or 0.0)
 
         self._has_pupil_baseline = baseline_pupil_px > 0.0
+        self._baseline_pupil_px = baseline_pupil_px
+        self._baseline_rmssd = float(getattr(self._session_manager, "baseline_rmssd", 0.0) or 0.0)
+        self._baseline_rmssd_std = float(getattr(self._session_manager, "baseline_rmssd_std", 0.0) or 0.0)
+        self._baseline_pupil_std = float(getattr(self._session_manager, "baseline_pupil_std", 0.0) or 0.0)
         self._pupil_card.set_unit("%")
+
+    @staticmethod
+    def _zscore_or_none(value: float, mean: float, std: float, eps: float = 1e-6) -> float | None:
+        """Return z-score if baseline std is valid, otherwise None."""
+        if std <= eps:
+            return None
+        return (value - mean) / std
+
+    def _warn_timeline_std_fallback_once(self, signal_name: str) -> None:
+        """Log a one-time warning when z-score fallback is used."""
+        if self._timeline_std_fallback_warned:
+            return
+        self._timeline_std_fallback_warned = True
+        logger.warning(
+            "Timeline z-score fallback active for %s because calibration std is unavailable/near-zero.",
+            signal_name,
+        )
 
     @staticmethod
     def _make_card() -> QFrame:

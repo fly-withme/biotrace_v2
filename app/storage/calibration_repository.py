@@ -40,6 +40,8 @@ class CalibrationRepository:
         baseline_rmssd: float,
         baseline_pupil_px: float,
         duration_seconds: int,
+        baseline_rmssd_std: float = 0.0,
+        baseline_pupil_std: float = 0.0,
     ) -> int:
         """Insert a calibration baseline record and return its ID.
 
@@ -48,6 +50,8 @@ class CalibrationRepository:
             baseline_rmssd: Resting RMSSD in milliseconds.
             baseline_pupil_px: Resting pupil diameter in px.
             duration_seconds: Actual recording duration in seconds.
+            baseline_rmssd_std: Standard deviation of RMSSD during calibration.
+            baseline_pupil_std: Standard deviation of pupil diameter during calibration.
 
         Returns:
             The ``id`` of the new calibration row.
@@ -56,16 +60,37 @@ class CalibrationRepository:
         cursor = self._conn.execute(
             """
             INSERT INTO calibrations
-                (session_id, recorded_at, duration_seconds, baseline_rmssd, baseline_pupil_mm)
-            VALUES (?, ?, ?, ?, ?)
+                (
+                    session_id,
+                    recorded_at,
+                    duration_seconds,
+                    baseline_rmssd,
+                    baseline_rmssd_std,
+                    baseline_pupil_mm,
+                    baseline_pupil_std
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (session_id, recorded_at, duration_seconds, baseline_rmssd, baseline_pupil_px),
+            (
+                session_id,
+                recorded_at,
+                duration_seconds,
+                baseline_rmssd,
+                baseline_rmssd_std,
+                baseline_pupil_px,
+                baseline_pupil_std,
+            ),
         )
         self._conn.commit()
         cal_id = cursor.lastrowid
         logger.info(
-            "Calibration saved: id=%d session=%d rmssd=%.2f pupil=%.3f px",
-            cal_id, session_id, baseline_rmssd, baseline_pupil_px,
+            "Calibration saved: id=%d session=%d rmssd=%.2f±%.2f pupil=%.3f±%.3f px",
+            cal_id,
+            session_id,
+            baseline_rmssd,
+            baseline_rmssd_std,
+            baseline_pupil_px,
+            baseline_pupil_std,
         )
         return cal_id
 

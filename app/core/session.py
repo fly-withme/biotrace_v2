@@ -27,7 +27,16 @@ from app.core.metrics import compute_rmssd, average_pupil_diameter
 from app.hardware.mock_sensors import MockHRVSensor, MockEyeTracker
 from app.hardware.error_counter import ErrorCounter
 from app.processing.hrv_processor import HRVProcessor
-from app.utils.config import USE_PICO_ECG, USE_EYE_TRACKER, PICO_ECG_PORT, PICO_ECG_BAUD, SESSIONS_DIR
+from app.utils.config import (
+    USE_PICO_ECG,
+    USE_EYE_TRACKER,
+    PICO_ECG_PORT,
+    PICO_ECG_BAUD,
+    SESSIONS_DIR,
+    CALIBRATION_DURATION_SECONDS,
+    CALIBRATION_MIN_RR_INTERVALS,
+    ERROR_EVENT_DEBOUNCE_SECONDS,
+)
 from app.processing.pupil_processor import PupilProcessor
 from app.processing.cli_processor import CLIProcessor
 from app.storage.database import DatabaseManager
@@ -93,6 +102,7 @@ class SessionManager(QObject):
         self._session_dir: Path | None = None
         self._session_start_time: float = 0.0
         self._error_count: int = 0
+        self._last_error_event_ts: float = 0.0
         self._recording_path: str | None = None
 
         self._db = db
@@ -106,12 +116,15 @@ class SessionManager(QObject):
 
         # ── Calibration accumulators (raw, pre-baseline) ───────────────
         self._cal_rr_intervals: deque[float] = deque()
+        self._cal_rmssd_values: deque[float] = deque()
         self._cal_pupils: deque[float] = deque()       # avg diameters in pixels
         self._cal_duration: int = 0
 
         # ── Baselines (set after calibration) ─────────────────────────
         self._baseline_rmssd:     float = 0.0
+        self._baseline_rmssd_std: float = 0.0
         self._baseline_pupil_px:  float = 0.0
+        self._baseline_pupil_std: float = 0.0
 
         # ── Sensors ────────────────────────────────────────────────────
         if USE_PICO_ECG:
@@ -148,6 +161,7 @@ class SessionManager(QObject):
         # Raw sensor → calibration accumulators
         self._hrv_sensor.raw_rr_interval_received.connect(self._on_cal_rr)
         self._eye_tracker.raw_pupil_received.connect(self._on_cal_pupil)
+        self._hrv_proc.rmssd_updated.connect(self._on_cal_rmssd)
 
         # Processors → CLI combiner
         self._hrv_proc.rmssd_updated.connect(self._cli_proc.on_rmssd_updated)
@@ -196,6 +210,12 @@ class SessionManager(QObject):
             avg = average_pupil_diameter(left_px, right_px)
             if avg is not None:
                 self._cal_pupils.append(avg)
+
+    @pyqtSlot(float, float)
+    def _on_cal_rmssd(self, rmssd: float, _timestamp: float) -> None:
+        """Accumulate rolling RMSSD values during calibration."""
+        if self._state == SessionState.CALIBRATING and rmssd > 0.0:
+            self._cal_rmssd_values.append(rmssd)
 
     # ------------------------------------------------------------------
     # DataStore write slots (active during RUNNING state only)
@@ -259,6 +279,10 @@ class SessionManager(QObject):
     def _on_hardware_error(self) -> None:
         """Increment error count when hardware sensor detects a touch."""
         if self._state == SessionState.RUNNING:
+            now = time.time()
+            if now - self._last_error_event_ts < ERROR_EVENT_DEBOUNCE_SECONDS:
+                return
+            self._last_error_event_ts = now
             self._error_count += 1
             self.error_count_updated.emit(self._error_count)
 
@@ -290,6 +314,7 @@ class SessionManager(QObject):
             return
 
         self._cal_rr_intervals.clear()
+        self._cal_rmssd_values.clear()
         self._cal_pupils.clear()
         self._state = SessionState.CALIBRATING
 
@@ -321,25 +346,56 @@ class SessionManager(QObject):
 
         # Compute baselines.
         rr_array = np.array(list(self._cal_rr_intervals), dtype=float)
-        self._baseline_rmssd = compute_rmssd(rr_array) if len(rr_array) >= 2 else 0.0
+        rmssd_array = np.array(list(self._cal_rmssd_values), dtype=float)
+        pupil_array = np.array(list(self._cal_pupils), dtype=float)
+        rr_count = len(self._cal_rr_intervals)
+        if (
+            duration_seconds >= CALIBRATION_DURATION_SECONDS
+            and rr_count >= CALIBRATION_MIN_RR_INTERVALS
+        ):
+            if len(rmssd_array) > 0:
+                self._baseline_rmssd = float(np.mean(rmssd_array))
+                self._baseline_rmssd_std = float(np.std(rmssd_array))
+            else:
+                self._baseline_rmssd = compute_rmssd(rr_array)
+                self._baseline_rmssd_std = 0.0
+        else:
+            self._baseline_rmssd = 0.0
+            self._baseline_rmssd_std = 0.0
+            logger.warning(
+                "Calibration RMSSD baseline rejected (duration=%ds, n_rr=%d; requires >=%ds and >=%d RR).",
+                duration_seconds,
+                rr_count,
+                CALIBRATION_DURATION_SECONDS,
+                CALIBRATION_MIN_RR_INTERVALS,
+            )
 
-        if self._cal_pupils:
-            self._baseline_pupil_px = float(np.mean(list(self._cal_pupils)))
+        if len(pupil_array) > 0:
+            self._baseline_pupil_px = float(np.mean(pupil_array))
+            self._baseline_pupil_std = float(np.std(pupil_array))
         else:
             self._baseline_pupil_px = 0.0
+            self._baseline_pupil_std = 0.0
 
         self._cal_duration = duration_seconds
 
         # Pass baseline to pupil processor.
         self._pupil_proc.set_baseline(self._baseline_pupil_px)
         self._data_store.baseline_rmssd = self._baseline_rmssd
+        self._data_store.baseline_rmssd_std = self._baseline_rmssd_std
         self._data_store.baseline_pupil_px = self._baseline_pupil_px
+        self._data_store.baseline_pupil_px_std = self._baseline_pupil_std
 
         self._state = SessionState.READY
         logger.info(
-            "Calibration complete: RMSSD=%.2f ms, pupil=%.3f px (n_rr=%d, n_pupils=%d)",
-            self._baseline_rmssd, self._baseline_pupil_px,
-            len(self._cal_rr_intervals), len(self._cal_pupils),
+            "Calibration complete: RMSSD=%.2f±%.2f ms, pupil=%.3f±%.3f px (n_rr=%d, n_rmssd=%d, n_pupils=%d)",
+            self._baseline_rmssd,
+            self._baseline_rmssd_std,
+            self._baseline_pupil_px,
+            self._baseline_pupil_std,
+            len(self._cal_rr_intervals),
+            len(self._cal_rmssd_values),
+            len(self._cal_pupils),
         )
         self.calibration_complete.emit(self._baseline_rmssd, self._baseline_pupil_px)
         return (self._baseline_rmssd, self._baseline_pupil_px)
@@ -364,6 +420,7 @@ class SessionManager(QObject):
         self._cli_proc.reset()
         self._data_store.clear()
         self._error_count = 0
+        self._last_error_event_ts = 0.0
         self.error_count_updated.emit(0)
 
         # Restore baseline in pupil processor (cleared by reset).
@@ -386,7 +443,9 @@ class SessionManager(QObject):
             self._cal_repo.save_calibration(
                 session_id=self._session_id,
                 baseline_rmssd=self._baseline_rmssd,
+                baseline_rmssd_std=self._baseline_rmssd_std,
                 baseline_pupil_px=self._baseline_pupil_px,
+                baseline_pupil_std=self._baseline_pupil_std,
                 duration_seconds=self._cal_duration,
             )
 
@@ -516,9 +575,19 @@ class SessionManager(QObject):
         return self._baseline_rmssd
 
     @property
+    def baseline_rmssd_std(self) -> float:
+        """Calibration RMSSD baseline standard deviation in milliseconds."""
+        return self._baseline_rmssd_std
+
+    @property
     def baseline_pupil_px(self) -> float:
         """Resting pupil diameter baseline in pixels (0.0 if not calibrated)."""
         return self._baseline_pupil_px
+
+    @property
+    def baseline_pupil_std(self) -> float:
+        """Calibration pupil baseline standard deviation in pixels."""
+        return self._baseline_pupil_std
 
     @property
     def data_store(self) -> DataStore:

@@ -72,7 +72,7 @@ class VideoPlayer(QWidget):
             self._cap = None
 
         if not file_path or not Path(file_path).exists():
-            self._show_placeholder("No recording found for this session.")
+            self._show_placeholder("No recording available for this session.")
             self._controls_container.hide()
             return
 
