@@ -2,3 +2,5 @@ recordings/
 biotrace.log
 .venv/
 **/__pycache__/
+sessions/
+.DS_Store

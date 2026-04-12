@@ -71,6 +71,9 @@ class LiveChart(QWidget):
         y_label: str = "",
         y_range: tuple[float, float] | None = None,
         window_seconds: int = 120,
+        pen_styles: list[Qt.PenStyle] | None = None,
+        pen_width: float = 2.5,
+        allow_interaction: bool = True,
         transparent: bool = False,
         parent: QWidget | None = None,
     ) -> None:
@@ -84,6 +87,9 @@ class LiveChart(QWidget):
         self._colours = colours
         self._window_seconds = window_seconds
         self._y_range = y_range
+        self._pen_styles = pen_styles or [Qt.PenStyle.SolidLine] * len(series)
+        self._pen_width = pen_width
+        self._allow_interaction = allow_interaction
         self._transparent = transparent
 
         # Data buffers — deques of (timestamp, value) pairs.
@@ -105,6 +111,10 @@ class LiveChart(QWidget):
         self._plot_widget.showGrid(x=False, y=True, alpha=0.3)
         self._plot_widget.getAxis("bottom").setLabel("Time (s)", color=COLOR_FONT_MUTED)
         self._plot_widget.getAxis("left").setLabel(y_label, color=COLOR_FONT_MUTED)
+        if not self._allow_interaction:
+            self._plot_widget.setMouseEnabled(x=False, y=False)
+            self._plot_widget.setMenuEnabled(False)
+            self._plot_widget.hideButtons()
 
         # Style both axes.
         for axis_name in ("bottom", "left"):
@@ -117,8 +127,8 @@ class LiveChart(QWidget):
 
         # Create one PlotDataItem per series.
         self._curves: dict[str, pg.PlotDataItem] = {}
-        for name, colour in zip(self._series_names, self._colours):
-            pen = pg.mkPen(color=colour, width=2.5)
+        for name, colour, pen_style in zip(self._series_names, self._colours, self._pen_styles):
+            pen = pg.mkPen(color=colour, width=self._pen_width, style=pen_style)
             curve = self._plot_widget.plot([], [], pen=pen, name=name)
             self._curves[name] = curve
 

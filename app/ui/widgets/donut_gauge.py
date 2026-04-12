@@ -46,6 +46,11 @@ class DonutGauge(QWidget):
         self._center_text = center_text
         self.update()
 
+    def set_accent_color(self, accent_color: str) -> None:
+        """Update active arc color at runtime."""
+        self._accent_color = accent_color
+        self.update()
+
     def paintEvent(self, _event) -> None:  # noqa: N802 (Qt API)
         """Render track and arc with anti-aliased painting."""
         painter = QPainter(self)

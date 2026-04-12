@@ -1,11 +1,11 @@
-"""Calibration view — two-step pupil + breathing calibration.
+"""Calibration view — eye alignment + breathing baseline calibration.
 
 User flow
 ---------
 New Session (Dashboard header) → CalibrationView opens →
 step 1 shows a live eye feed with a circular guide →
-user aligns their eye and presses Space →
-step 2 shows the breathing-guided HRV baseline screen →
+user aligns their eye and presses Space/Next (manual override always available) →
+step 2 shows the breathing-guided HRV + pupil baseline screen →
 baseline completes → ``proceed_to_live`` → LiveView
 
 Dependency injection: call ``bind_session_manager()`` once after
@@ -292,8 +292,9 @@ class _EyePreviewWorker(QThread):
     _MAX_DIAMETER_PX: float = 400.0
 
     # Pupil centre must fall within this fraction of the frame dimensions
-    # to be accepted as "good".  0.60 = central 60 % of each axis.
-    _CENTER_ZONE: float = 0.60
+    # to be accepted as "good".  0.72 = central 72 % of each axis
+    # (deliberately lenient to reduce positioning frustration).
+    _CENTER_ZONE: float = 0.72
 
     def __init__(self, camera_index: int) -> None:
         super().__init__()
@@ -447,7 +448,7 @@ class EyeCameraPreview(QFrame):
     _PREVIEW_H:            int = 180
     _VIDEO_W:              int = 214
     _VIDEO_H:              int = 140
-    _LOCK_FRAMES_REQUIRED: int = 15   # ~0.5 s at 30 fps — faster lock for smoother UX
+    _LOCK_FRAMES_REQUIRED: int = 10   # ~0.33 s at 30 fps — lenient lock for smoother UX
 
     def __init__(
         self,
@@ -761,22 +762,12 @@ class CalibrationView(QWidget):
         layout.setSpacing(SPACE_3)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
 
-        headline = QLabel("Pupil Dilation Calibration")
+        headline = QLabel("Eye Alignment Check")
         headline.setAlignment(Qt.AlignmentFlag.AlignCenter)
         headline.setStyleSheet(
             f"color: {COLOR_FONT}; font-size: {FONT_TITLE}px; font-weight: 600;"
         )
         layout.addWidget(headline)
-
-        instruction = QLabel(
-            "Look into the live eye feed and center your pupil inside the guide.\n"
-            "When alignment is stable, press the spacebar to continue."
-        )
-        instruction.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        instruction.setStyleSheet(
-            f"color: {COLOR_FONT_MUTED}; font-size: {FONT_BODY}px;"
-        )
-        layout.addWidget(instruction)
 
         if USE_EYE_TRACKER:
             self._eye_preview = EyeCameraPreview(EYE_TRACKER_CAMERA_INDEX, compact=False)
@@ -799,12 +790,33 @@ class CalibrationView(QWidget):
         )
         layout.addWidget(self._pupil_status_label)
 
-        self._pupil_hint_label = QLabel("Spacebar locked until alignment is ready")
+        self._pupil_hint_label = QLabel("Press Space or Next to continue")
         self._pupil_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._pupil_hint_label.setStyleSheet(
             f"color: {COLOR_FONT}; font-size: {FONT_SMALL}px; font-weight: 600;"
         )
         layout.addWidget(self._pupil_hint_label)
+
+        self._pupil_next_btn = QPushButton("Next")
+        self._pupil_next_btn.setFixedSize(120, 40)
+        self._pupil_next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pupil_next_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {COLOR_PRIMARY};
+                color: #FFFFFF;
+                border: none;
+                border-radius: 20px;
+                font-size: {FONT_BODY}px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background: {COLOR_PRIMARY_HOVER};
+            }}
+            """
+        )
+        self._pupil_next_btn.clicked.connect(lambda: self._continue_from_pupil_step("next_button"))
+        layout.addWidget(self._pupil_next_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self._content_stack.addWidget(page)
 
@@ -862,9 +874,9 @@ class CalibrationView(QWidget):
     def _on_eye_locked(self) -> None:
         """Unlock the handoff into the breathing step once alignment is stable."""
         self._eye_ready = True
-        self._pupil_status_label.setText("Alignment confirmed. Press Space to continue.")
-        self._pupil_hint_label.setText("Press Space")
-        logger.info("Eye alignment locked — waiting for user to press Space.")
+        self._pupil_status_label.setText("Alignment confirmed.")
+        self._pupil_hint_label.setText("Press Space or Next")
+        logger.info("Eye alignment locked — waiting for user to continue.")
 
     @pyqtSlot()
     def _on_eye_cam_unavailable(self) -> None:
@@ -873,35 +885,35 @@ class CalibrationView(QWidget):
         self._pupil_status_label.setText(
             "Camera unavailable — grant permission in System Settings → Privacy → Camera"
         )
-        self._pupil_hint_label.setText("Press Space to continue without the preview")
+        self._pupil_hint_label.setText("Press Space or Next to continue without the preview")
         logger.warning("Eye camera unavailable; step 1 can still continue.")
 
     def _show_pupil_alignment_step(self) -> None:
         """Activate the eye-alignment screen."""
         self._step = "pupil_alignment"
-        self._step_label.setText("STEP 1 OF 2  ·  PUPIL DILATION")
+        self._step_label.setText("STEP 1 OF 2  ·  EYE ALIGNMENT")
         self._content_stack.setCurrentIndex(0)
         self._countdown_ring.hide()
         self._restart_btn.hide()
         if USE_EYE_TRACKER:
             self._eye_ready = False
-            self._pupil_status_label.setText("Align your eye within the circular guide")
-            self._pupil_hint_label.setText("Spacebar locked until alignment is ready")
+            self._pupil_status_label.setText("Auto-detecting pupil alignment...")
+            self._pupil_hint_label.setText("Press Space or Next to continue")
             if self._eye_preview:
                 self._eye_preview.start()
         else:
             self._eye_ready = True
-            self._pupil_status_label.setText("Eye tracker disabled — press Space to continue")
-            self._pupil_hint_label.setText("Press Space")
+            self._pupil_status_label.setText("Eye tracker disabled")
+            self._pupil_hint_label.setText("Press Space or Next")
         self.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _show_breathing_step(self) -> None:
         """Activate the breathing baseline screen after eye alignment."""
         self._step = "breathing"
         self._content_stack.setCurrentIndex(1)
-        self._step_label.setText("STEP 2 OF 2  ·  BREATHING CALIBRATION")
+        self._step_label.setText("STEP 2 OF 2  ·  HRV + PUPIL BASELINE")
         self._breath_label.setText("Press Start")
-        self._status_label.setText("Follow the orb to record your HRV baseline")
+        self._status_label.setText("Follow the orb to record your HRV and pupil baseline")
         self._cta_btn.show()
         self._cta_btn.setEnabled(True)
         self._cta_btn.setText("  Start")
@@ -916,9 +928,15 @@ class CalibrationView(QWidget):
         """Advance from pupil alignment to breathing when Space is pressed."""
         if self._step != "pupil_alignment":
             return
-        if not self._eye_ready:
-            self._pupil_status_label.setText("Align your eye before continuing")
+        self._continue_from_pupil_step("spacebar")
+
+    def _continue_from_pupil_step(self, source: str) -> None:
+        """Advance to breathing step, with manual override when eye lock is missing."""
+        if self._step != "pupil_alignment":
             return
+        if not self._eye_ready:
+            self._pupil_status_label.setText("Proceeding without confirmed alignment.")
+            logger.info("Pupil alignment manually overridden via %s.", source)
         self._show_breathing_step()
 
     # ------------------------------------------------------------------
@@ -1121,7 +1139,7 @@ class CalibrationView(QWidget):
         self._cta_btn.hide()
         self._breath_label.setText("Breathe in…")
         self._status_label.setText(
-            f"Recording baseline — {CALIBRATION_DURATION_SECONDS} s remaining"
+            f"Recording HRV + pupil baseline — {CALIBRATION_DURATION_SECONDS} s remaining"
         )
 
         if self._session_manager is not None:
@@ -1157,7 +1175,7 @@ class CalibrationView(QWidget):
         self._countdown_ring.set_progress(progress)
         if self._baseline_remaining > 0:
             self._status_label.setText(
-                f"Recording baseline — {self._baseline_remaining} s remaining"
+                f"Recording HRV + pupil baseline — {self._baseline_remaining} s remaining"
             )
         else:
             self._countdown_timer.stop()

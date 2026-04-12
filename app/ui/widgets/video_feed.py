@@ -353,11 +353,11 @@ class VideoFeed(QLabel):
             return  # widget not yet laid out — skip until it has a real size
 
         pixmap = QPixmap.fromImage(qt_image)
-        # Scale to fit while preserving aspect ratio. FastTransformation is used
-        # to ensure the UI thread remains responsive during 1080p feeds.
+        # Fill the full widget while preserving aspect ratio (center-crop).
+        # FastTransformation keeps rendering lightweight in the UI thread.
         scaled = pixmap.scaled(
             size,
-            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
             Qt.TransformationMode.FastTransformation,
         )
         self.setPixmap(scaled)
