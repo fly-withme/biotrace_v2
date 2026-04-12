@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot, QSize
-from PyQt6.QtGui import QImage, QPixmap, QShortcut, QKeySequence
+from PyQt6.QtGui import QShortcut, QKeySequence
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -287,10 +287,6 @@ class LiveView(QWidget):
         self._mode_stack.setCurrentIndex(_MODE_BIOFEEDBACK)
         layout.addWidget(self._mode_stack, 0, 0)
 
-        # Wire the camera feed to the biofeedback preview label.
-        # _video_feed is created by _build_mode_camera() above.
-        self._video_feed.frame_ready.connect(self._on_bio_frame)
-
         # Overlay: Top toolbar
         toolbar_container = QWidget()
         toolbar_container.setObjectName("live_toolbar")
@@ -469,25 +465,6 @@ class LiveView(QWidget):
         core_layout = QVBoxLayout(core_widget)
         core_layout.setContentsMargins(SPACE_3, SPACE_3, SPACE_3, SPACE_3)
         core_layout.setSpacing(SPACE_1)
-
-        # ── Live video preview ─────────────────────────────────────────
-        video_header = QLabel("LIVE FEED")
-        video_header.setStyleSheet(
-            f"color: {COLOR_FONT_MUTED}; font-size: {FONT_CAPTION}px; "
-            "font-weight: 700; letter-spacing: 2px;"
-        )
-        core_layout.addWidget(video_header)
-
-        self._bio_video_label = QLabel()
-        self._bio_video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._bio_video_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        self._bio_video_label.setFixedHeight(160)
-        self._bio_video_label.setStyleSheet(
-            "background: #000000; border-radius: 8px;"
-        )
-        core_layout.addWidget(self._bio_video_label)
 
         core_header = QHBoxLayout()
         core_title = QLabel("CORE STATE SYNTHESIS")
@@ -977,24 +954,6 @@ class LiveView(QWidget):
             self._workload_gauge.set_value(workload, f"{workload_pct:.0f}%")
             self._cam_workload_gauge.set_value(workload, f"{workload_pct:.0f}%")
             self._timeline_chart.append("WORKLOAD", timestamp, workload)
-
-    @pyqtSlot(object)
-    def _on_bio_frame(self, qt_image: QImage) -> None:
-        """Mirror a camera frame to the small video preview in biofeedback mode.
-
-        Args:
-            qt_image: RGB QImage emitted by the VideoFeed worker.
-        """
-        size = self._bio_video_label.size()
-        if size.width() <= 0 or size.height() <= 0:
-            return
-        pixmap = QPixmap.fromImage(qt_image)
-        scaled = pixmap.scaled(
-            size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation,
-        )
-        self._bio_video_label.setPixmap(scaled)
 
     @pyqtSlot(float, float)
     def _on_calibration_complete(self, _baseline_rmssd: float, baseline_pupil_px: float) -> None:

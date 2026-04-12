@@ -336,6 +336,11 @@ class VideoFeed(QLabel):
         if not self._active:
             return  # feed was stopped; discard any queued frames
 
+        # Broadcast the raw image first so secondary display widgets can render
+        # camera frames even while this primary label lives in a hidden stacked
+        # page and therefore has no usable on-screen size yet.
+        self.frame_ready.emit(qt_image)
+
         # Clear the placeholder stylesheet on the very first frame so the
         # background fill and border don't paint over the camera image.
         if self._showing_placeholder:
@@ -356,10 +361,6 @@ class VideoFeed(QLabel):
             Qt.TransformationMode.FastTransformation,
         )
         self.setPixmap(scaled)
-
-        # Broadcast the raw image so secondary display widgets can render it
-        # without opening an additional camera capture thread.
-        self.frame_ready.emit(qt_image)
 
     @pyqtSlot(str)
     def _on_error(self, message: str) -> None:
