@@ -89,7 +89,8 @@ PUPIL_PDI_OUTLIER_CLAMP: float = 0.40
 CALIBRATION_DURATION_SECONDS: int = 20
 
 # Minimum RR intervals required for accepting an RMSSD calibration baseline.
-CALIBRATION_MIN_RR_INTERVALS: int = 30
+# For a 20 s window this should stay lenient enough for normal resting HR.
+CALIBRATION_MIN_RR_INTERVALS: int = 15
 
 # ---------------------------------------------------------------------------
 # Cognitive Load Index (CLI)

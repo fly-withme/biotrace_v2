@@ -28,18 +28,14 @@ from app.ui.theme import (
     COLOR_BORDER,
     COLOR_CARD,
     COLOR_DANGER,
-    COLOR_DANGER_BG,
     COLOR_FONT,
     COLOR_FONT_MUTED,
     COLOR_PRIMARY,
     COLOR_PRIMARY_HOVER,
     COLOR_PRIMARY_SUBTLE,
-    COLOR_SUCCESS,
     COLOR_WARNING,
-    COLOR_WARNING_BG,
     FONT_BODY,
     FONT_CAPTION,
-    FONT_HEADING_1,
     FONT_HEADING_2,
     FONT_SMALL,
     RADIUS_LG,
@@ -51,28 +47,28 @@ from app.ui.theme import (
     CONTENT_PADDING_V,
     CHART_HEIGHT_TIMELINE,
     WEIGHT_BOLD,
-    WEIGHT_EXTRABOLD,
     WEIGHT_SEMIBOLD,
     get_icon,
+)
+from app.utils.config import (
+    WORKLOAD_PUPIL_ROLLING_SECONDS,
+    WORKLOAD_PUPIL_SMOOTHING_SECONDS,
+    WORKLOAD_THRESHOLD_FACTOR,
 )
 from app.storage.database import DatabaseManager
 from app.storage.export import SessionExporter
 from app.storage.session_repository import SessionRepository
 from app.ui.widgets.video_player import VideoPlayer
 from app.ui.widgets.timeline_chart import TimelineChart
-from app.ui.widgets.donut_gauge import DonutGauge
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-CARD_TITLE_FONT_SIZE = FONT_HEADING_2 - 4
-
 
 class PostSessionView(QWidget):
     """Individual session dashboard shown after a session ends or when opened from history.
 
     Shows session date/title, four summary metric cards (session duration,
-    errors, max stress, max cognitive load), a biometric timeline chart with series toggle, and a video
+    errors, stress events, high workload events), a biometric timeline chart with series toggle, and a video
     playback area.
 
     User flow
@@ -96,10 +92,8 @@ class PostSessionView(QWidget):
         self._exporter = SessionExporter(db)
         self._session_repo = SessionRepository(db)
         
-        self._duration_gauge: DonutGauge | None = None
-        self._errors_gauge: DonutGauge | None = None
-        self._max_stress_gauge: DonutGauge | None = None
-        self._max_cli_gauge: DonutGauge | None = None
+        self._metric_value_labels: dict[str, QLabel] = {}
+        self._metric_subtitle_labels: dict[str, QLabel] = {}
         self._start_session_btn: QPushButton | None = None
         self._export_btn: QPushButton | None = None
 
@@ -165,14 +159,33 @@ class PostSessionView(QWidget):
                 self._title_label.setText("Session —")
 
         duration_s = self._compute_session_duration_seconds(session["started_at"], session["ended_at"])
+        video_path = self._session_repo.get_video_path(session_id)
+        recording_duration_s = self._compute_recording_duration_seconds(video_path)
+        # Session duration reflects active session runtime in DB:
+        # from post-calibration session start until user presses End Session.
         self._set_metric_cards(session_id, duration_s, session["error_count"])
 
         # ── Timeline Data ──────────────────────────────────────────────
-        self._timeline_chart.load_session(self._db, session_id)
+        self._timeline_chart.load_session(
+            self._db,
+            session_id,
+            expected_duration_s=duration_s,
+        )
 
         # ── Video Recording ────────────────────────────────────────────
-        video_path = self._session_repo.get_video_path(session_id)
         self._video_player.load(video_path)
+
+        if (
+            duration_s is not None
+            and recording_duration_s is not None
+            and abs(duration_s - recording_duration_s) > 1
+        ):
+            logger.warning(
+                "Session %d duration mismatch: DB=%ds, video=%ds",
+                session_id,
+                duration_s,
+                recording_duration_s,
+            )
 
         logger.info("PostSessionView loaded session_id=%d", session_id)
 
@@ -214,7 +227,7 @@ class PostSessionView(QWidget):
         # Row 2: Session Analysis (Timeline Chart)
         analysis_card = self._build_analysis_card()
         # Ensure it has enough space in the scroll view
-        analysis_card.setMinimumHeight(420)
+        analysis_card.setMinimumHeight(520)
         content_layout.addWidget(analysis_card)
 
         # Row 3: Video Player
@@ -312,15 +325,6 @@ class PostSessionView(QWidget):
             """
         )
 
-        self._start_session_btn = QPushButton("Start Session")
-        self._start_session_btn.setIcon(get_icon("ph.play-fill", color="#FFFFFF"))
-        self._start_session_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
-        self._start_session_btn.setFixedHeight(FONT_HEADING_2 * 2)
-        self._start_session_btn.setMinimumWidth(170)
-        self._start_session_btn.setStyleSheet(primary_action_button_stylesheet)
-        self._start_session_btn.clicked.connect(self.new_session_requested.emit)
-        header.addWidget(self._start_session_btn)
-
         self._export_btn = QPushButton("Export Data ")
         self._export_btn.setObjectName("secondary")
         self._export_btn.setIcon(get_icon("ph.arrow-right", color=COLOR_PRIMARY))
@@ -331,6 +335,15 @@ class PostSessionView(QWidget):
         self._export_btn.setStyleSheet(ghost_action_button_stylesheet)
         self._export_btn.clicked.connect(self._on_export_clicked)
         header.addWidget(self._export_btn)
+
+        self._start_session_btn = QPushButton("Start Session")
+        self._start_session_btn.setIcon(get_icon("ph.play-fill", color="#FFFFFF"))
+        self._start_session_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
+        self._start_session_btn.setFixedHeight(FONT_HEADING_2 * 2)
+        self._start_session_btn.setMinimumWidth(170)
+        self._start_session_btn.setStyleSheet(primary_action_button_stylesheet)
+        self._start_session_btn.clicked.connect(self.new_session_requested.emit)
+        header.addWidget(self._start_session_btn)
 
         return header
 
@@ -358,64 +371,82 @@ class PostSessionView(QWidget):
     def _build_metric_cards(self) -> QHBoxLayout:
         """Build the four summary metric cards for this individual session."""
         row = QHBoxLayout()
-        row.setSpacing(GRID_GUTTER)
+        row.setSpacing(SPACE_2)
 
-        self._duration_gauge = self._add_metric_card(
-            row, "SESSION DURATION", COLOR_PRIMARY, COLOR_PRIMARY_SUBTLE
-        )
-        self._errors_gauge = self._add_metric_card(
-            row, "NUMBER OF ERRORS", COLOR_DANGER, COLOR_DANGER_BG
-        )
-        self._max_stress_gauge = self._add_metric_card(
-            row, "MAX STRESS", COLOR_PRIMARY, COLOR_PRIMARY_SUBTLE
-        )
-        self._max_cli_gauge = self._add_metric_card(
-            row, "MAX COGNITIVE LOAD", COLOR_WARNING, COLOR_WARNING_BG
-        )
+        self._add_metric_card(row, key="duration", title="SESSION DURATION")
+        self._add_metric_card(row, key="errors", title="NUMBER OF ERRORS")
+        self._add_metric_card(row, key="stress_events", title="STRESS EVENTS")
+        self._add_metric_card(row, key="workload_events", title="HIGH WORKLOAD EVENTS")
 
         return row
 
     def _add_metric_card(
         self,
         layout: QHBoxLayout,
+        key: str,
         title: str,
-        accent: str,
-        track: str,
-    ) -> DonutGauge:
-        """Create one metric card matching Dashboard style and return the DonutGauge."""
+    ) -> None:
+        """Create one numeric metric card and register value/subtitle labels."""
         card = QFrame()
         card.setObjectName("card")
         card.setStyleSheet(
             f"QFrame#card {{ background-color: transparent; border: 1px solid {COLOR_BORDER};"
             f" border-radius: {RADIUS_LG}px; }}"
         )
-        card.setMinimumHeight(300)
+        card.setMinimumHeight(190)
+        card.setMinimumWidth(0)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(SPACE_3, SPACE_2, SPACE_3, SPACE_3)
         card_layout.setSpacing(SPACE_1)
 
-        card_layout.addStretch(1)
-        gauge = DonutGauge(
-            value=0.0,
-            accent_color=accent,
-            track_color=track,
-            center_text="—",
-            half_circle=True
-        )
-        gauge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        card_layout.addWidget(gauge, alignment=Qt.AlignmentFlag.AlignHCenter)
-        card_layout.addStretch(1)
+        icon_by_key = {
+            "duration": ("ph.timer-fill", COLOR_PRIMARY),
+            "errors": ("ph.warning-circle-fill", COLOR_DANGER),
+            "stress_events": ("ph.heartbeat-fill", COLOR_PRIMARY),
+            "workload_events": ("ph.brain-fill", COLOR_WARNING),
+        }
+        icon_name, icon_color = icon_by_key.get(key, ("ph.circle-fill", COLOR_FONT_MUTED))
+
+        title_row = QHBoxLayout()
+        title_row.setSpacing(6)
+        title_row.addStretch(1)
+
+        icon_label = QLabel()
+        icon_label.setPixmap(get_icon(icon_name, color=icon_color).pixmap(14, 14))
+        title_row.addWidget(icon_label)
 
         title_label = QLabel(title)
-        title_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         title_label.setStyleSheet(
-            f"color: {COLOR_FONT}; font-size: {CARD_TITLE_FONT_SIZE}px; font-weight: 700;"
+            f"color: {COLOR_FONT}; font-size: {FONT_CAPTION}px; font-weight: {WEIGHT_BOLD};"
+            "letter-spacing: 0.5px;"
         )
-        card_layout.addWidget(title_label)
+        title_row.addWidget(title_label)
+        title_row.addStretch(1)
+        card_layout.addLayout(title_row)
 
-        layout.addWidget(card)
-        return gauge
+        card_layout.addStretch(1)
+
+        value_label = QLabel("—")
+        value_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        value_label.setStyleSheet(
+            f"color: {COLOR_PRIMARY}; font-size: {FONT_HEADING_2 + 10}px; font-weight: {WEIGHT_BOLD};"
+        )
+        card_layout.addWidget(value_label, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        subtitle_label = QLabel("")
+        subtitle_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        subtitle_label.setStyleSheet(
+            f"color: {COLOR_FONT_MUTED}; font-size: {FONT_SMALL}px; font-weight: {WEIGHT_SEMIBOLD};"
+        )
+        subtitle_label.hide()
+        card_layout.addWidget(subtitle_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        card_layout.addStretch(1)
+
+        self._metric_value_labels[key] = value_label
+        self._metric_subtitle_labels[key] = subtitle_label
+        layout.addWidget(card, stretch=1)
 
     def _build_analysis_card(self) -> QFrame:
         """Build the session analysis card with series toggle buttons."""
@@ -485,7 +516,7 @@ class PostSessionView(QWidget):
         title_row.addWidget(hrv_btn)
 
         outer.addLayout(title_row)
-        self._timeline_chart.setMinimumHeight(CHART_HEIGHT_TIMELINE)
+        self._timeline_chart.setMinimumHeight(CHART_HEIGHT_TIMELINE + 80)
         outer.addWidget(self._timeline_chart, stretch=1)
 
         return card
@@ -510,6 +541,26 @@ class PostSessionView(QWidget):
             return None
         return duration_s
 
+    def _compute_recording_duration_seconds(self, video_path: str | None) -> int | None:
+        """Return video recording duration in seconds, or None if unavailable."""
+        if not video_path:
+            return None
+        try:
+            import cv2
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                return None
+            frame_count = float(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = float(cap.get(cv2.CAP_PROP_FPS))
+            cap.release()
+            if frame_count <= 0.0 or fps <= 0.0:
+                return None
+            duration_s = int(round(frame_count / fps))
+            return duration_s if duration_s >= 0 else None
+        except Exception:
+            logger.warning("Could not compute recording duration for %s", video_path)
+            return None
+
     def _format_duration(self, seconds: int) -> str:
         """Format seconds as M:SS (or H:MM:SS when >= 1h)."""
         h, rem = divmod(seconds, 3600)
@@ -518,8 +569,8 @@ class PostSessionView(QWidget):
             return f"{h}:{m:02d}:{s:02d}"
         return f"{m}:{s:02d}"
 
-    def _query_max_stress_percent(self, session_id: int) -> float | None:
-        """Compute max stress (%) for a session from RMSSD against baseline/mean reference."""
+    def _query_stress_event_counts(self, session_id: int) -> tuple[int, int]:
+        """Return (stress_events, severe_events) using crossing-based RMSSD logic."""
         conn = self._db.get_connection()
         cal_row = conn.execute(
             "SELECT baseline_rmssd FROM calibrations "
@@ -531,11 +582,11 @@ class PostSessionView(QWidget):
 
         rows = conn.execute(
             "SELECT rmssd FROM hrv_samples "
-            "WHERE session_id = ? AND rmssd IS NOT NULL",
+            "WHERE session_id = ? AND rmssd IS NOT NULL ORDER BY timestamp",
             (session_id,),
         ).fetchall()
         if not rows:
-            return None
+            return (0, 0)
 
         rmssd_vals = [float(r["rmssd"]) for r in rows]
         if baseline_rmssd is not None and baseline_rmssd > 0:
@@ -543,47 +594,106 @@ class PostSessionView(QWidget):
         else:
             ref = float(sum(rmssd_vals) / len(rmssd_vals))
             if ref <= 0:
-                return None
+                return (0, 0)
 
-        stress_series = [max(0.0, (ref - value) / ref * 100.0) for value in rmssd_vals]
-        return max(stress_series) if stress_series else None
+        stress_events = 0
+        severe_events = 0
+        prev_below_stress = False
+        prev_below_severe = False
 
-    def _query_max_cli(self, session_id: int) -> float | None:
-        """Return max CLI in [0.0, 1.0] for a session."""
+        for value in rmssd_vals:
+            rmssd_pct_change = ((value - ref) / ref) * 100.0
+            is_below_stress = rmssd_pct_change < -10.0
+            is_below_severe = rmssd_pct_change < -40.0
+
+            if is_below_stress and not prev_below_stress:
+                stress_events += 1
+            if is_below_severe and not prev_below_severe:
+                severe_events += 1
+
+            prev_below_stress = is_below_stress
+            prev_below_severe = is_below_severe
+
+        return (stress_events, severe_events)
+
+    def _query_high_workload_events(self, session_id: int) -> int:
+        """Return count of pupil-vs-threshold crossings (same logic as live view)."""
         conn = self._db.get_connection()
-        row = conn.execute(
-            "SELECT MAX(cli) AS max_cli FROM cli_samples WHERE session_id = ?",
+        rows = conn.execute(
+            "SELECT timestamp, pdi FROM pupil_samples "
+            "WHERE session_id = ? AND pdi IS NOT NULL ORDER BY timestamp",
             (session_id,),
-        ).fetchone()
-        if row is None or row["max_cli"] is None:
-            return None
-        return max(0.0, min(1.0, float(row["max_cli"])))
+        ).fetchall()
+        if not rows:
+            return 0
+
+        from collections import deque
+
+        smooth_window: deque[tuple[float, float]] = deque()
+        rolling_window: deque[tuple[float, float]] = deque()
+
+        def append_window_mean(
+            buffer: deque[tuple[float, float]],
+            timestamp: float,
+            value: float,
+            window_seconds: float,
+        ) -> float:
+            buffer.append((timestamp, value))
+            cutoff = timestamp - window_seconds
+            while buffer and buffer[0][0] < cutoff:
+                buffer.popleft()
+            return float(sum(sample for _, sample in buffer) / len(buffer))
+
+        events = 0
+        prev_above = False
+        for row in rows:
+            timestamp = float(row["timestamp"])
+            pdi = float(row["pdi"])
+            smoothed_pdi = append_window_mean(
+                smooth_window,
+                timestamp,
+                pdi,
+                WORKLOAD_PUPIL_SMOOTHING_SECONDS,
+            )
+            rolling_mean = append_window_mean(
+                rolling_window,
+                timestamp,
+                smoothed_pdi,
+                WORKLOAD_PUPIL_ROLLING_SECONDS,
+            )
+            threshold = rolling_mean * WORKLOAD_THRESHOLD_FACTOR
+            above = smoothed_pdi > threshold
+            if above and not prev_above:
+                events += 1
+            prev_above = above
+        return events
+
+    def _set_card_value(self, key: str, value: str, subtitle: str = "") -> None:
+        """Set value/subtitle on one summary metric card."""
+        value_label = self._metric_value_labels.get(key)
+        subtitle_label = self._metric_subtitle_labels.get(key)
+        if value_label is not None:
+            value_label.setText(value)
+        if subtitle_label is not None:
+            subtitle_label.setText(subtitle)
+            subtitle_label.setVisible(bool(subtitle))
 
     def _set_metric_cards(self, session_id: int, duration_s: int | None, error_count: int | None) -> None:
-        """Populate all issue-21 metric cards from session data."""
-        if self._duration_gauge:
-            if duration_s is None:
-                self._duration_gauge.set_value(0.0, "—")
-            else:
-                self._duration_gauge.set_value(min(1.0, duration_s / 3600.0), self._format_duration(duration_s))
+        """Populate summary cards with duration/error/stress/workload event counts."""
+        self._set_card_value(
+            key="duration",
+            value="—" if duration_s is None else self._format_duration(duration_s),
+        )
 
         err_val = int(error_count) if error_count is not None else 0
-        if self._errors_gauge:
-            self._errors_gauge.set_value(min(1.0, err_val / 20.0), str(err_val))
+        self._set_card_value(key="errors", value=str(err_val))
 
-        max_stress_pct = self._query_max_stress_percent(session_id)
-        if self._max_stress_gauge:
-            if max_stress_pct is None:
-                self._max_stress_gauge.set_value(0.0, "—")
-            else:
-                self._max_stress_gauge.set_value(
-                    min(1.0, max_stress_pct / 100.0),
-                    f"{max_stress_pct:.0f}%",
-                )
+        stress_events, _severe_events = self._query_stress_event_counts(session_id)
+        self._set_card_value(
+            key="stress_events",
+            value=str(stress_events),
+            subtitle="",
+        )
 
-        max_cli = self._query_max_cli(session_id)
-        if self._max_cli_gauge:
-            if max_cli is None:
-                self._max_cli_gauge.set_value(0.0, "—")
-            else:
-                self._max_cli_gauge.set_value(max_cli, f"{max_cli * 100:.0f}%")
+        workload_events = self._query_high_workload_events(session_id)
+        self._set_card_value(key="workload_events", value=str(workload_events))

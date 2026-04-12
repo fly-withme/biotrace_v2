@@ -203,9 +203,10 @@ class _CameraWorker(QThread):
                 and self._record_target_path is not None
             ):
                 height, width = frame.shape[:2]
-                fps = float(cap.get(cv2.CAP_PROP_FPS))
-                if fps <= 0.0:
-                    fps = VIDEO_RECORDING_FPS_FALLBACK
+                # Use a stable target FPS for encoding. Some camera backends
+                # report unreliable CAP_PROP_FPS values that make playback run
+                # too fast/slow when the file is decoded later.
+                fps = VIDEO_RECORDING_FPS_FALLBACK
 
                 Path(self._record_target_path).parent.mkdir(parents=True, exist_ok=True)
                 fourcc = cv2.VideoWriter_fourcc(*VIDEO_RECORDING_FOURCC)

@@ -32,6 +32,7 @@ from app.ui.theme import (
     CHART_HEIGHT_TIMELINE,
     get_icon,
 )
+from app.utils.config import VIDEO_RECORDING_FPS_FALLBACK
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -52,10 +53,11 @@ class VideoPlayer(QWidget):
         super().__init__(parent)
         self._cap: cv2.VideoCapture | None = None
         self._timer = QTimer(self)
-        self._timer.setInterval(33)  # ~30 fps
+        self._timer.setInterval(int(round(1000.0 / VIDEO_RECORDING_FPS_FALLBACK)))
         self._timer.timeout.connect(self._advance_frame)
 
         self._duration_ms: float = 0.0
+        self._source_fps: float = VIDEO_RECORDING_FPS_FALLBACK
         self._is_playing: bool = False
         self._is_scrubbing: bool = False
 
@@ -84,12 +86,15 @@ class VideoPlayer(QWidget):
             return
 
         # Get metadata
-        fps = self._cap.get(cv2.CAP_PROP_FPS)
+        fps = float(self._cap.get(cv2.CAP_PROP_FPS))
         count = self._cap.get(cv2.CAP_PROP_FRAME_COUNT)
         if fps > 0:
+            self._source_fps = fps
             self._duration_ms = (count / fps) * 1000.0
         else:
+            self._source_fps = VIDEO_RECORDING_FPS_FALLBACK
             self._duration_ms = 0.0
+        self._timer.setInterval(max(1, int(round(1000.0 / self._source_fps))))
 
         self._slider.setRange(0, int(self._duration_ms))
         self._slider.setValue(0)

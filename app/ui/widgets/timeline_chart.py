@@ -57,7 +57,12 @@ class TimelineChart(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def load_session(self, db: DatabaseManager, session_id: int) -> None:
+    def load_session(
+        self,
+        db: DatabaseManager,
+        session_id: int,
+        expected_duration_s: int | None = None,
+    ) -> None:
         """Query the database and plot normalised series for the given session.
 
         RMSSD is expressed as percent change from the calibration baseline.
@@ -126,7 +131,26 @@ class TimelineChart(QWidget):
         if pupil_x:
             self._pupil_curve.setData(pupil_x, pupil_y)
 
-        self._plot_item.autoRange()
+        max_data_time = 0.0
+        if stress_x:
+            max_data_time = max(max_data_time, max(stress_x))
+        if pupil_x:
+            max_data_time = max(max_data_time, max(pupil_x))
+
+        if expected_duration_s is not None and expected_duration_s > 0:
+            x_max = float(expected_duration_s)
+            if max_data_time > 0.0 and abs(max_data_time - x_max) > 1.0:
+                logger.warning(
+                    "Timeline duration mismatch for session %d: data=%.2fs, expected=%.2fs",
+                    session_id,
+                    max_data_time,
+                    x_max,
+                )
+        else:
+            x_max = max_data_time if max_data_time > 0.0 else 1.0
+
+        self._plot_widget.setXRange(0.0, x_max, padding=0.0)
+        self._plot_widget.setYRange(-50.0, 150.0, padding=0)
         logger.info(
             "TimelineChart loaded session %d: %d RMSSD %%, %d PDI %% points",
             session_id, len(stress_x), len(pupil_x),
@@ -218,6 +242,7 @@ class TimelineChart(QWidget):
         self._plot_item.setLabel(
             "left", "% Change from Baseline", color=COLOR_FONT_MUTED
         )
+        self._plot_widget.setYRange(-50.0, 150.0, padding=0)
 
         # Add a zero-baseline reference line.
         zero_line = pg.InfiniteLine(

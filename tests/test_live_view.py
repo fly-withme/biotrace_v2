@@ -61,4 +61,4 @@ class TestLiveView:
         assert "HRV" in view._timeline_chart._curves
         assert "STRESS" not in view._timeline_chart._curves
         assert list(view._timeline_chart._timestamps["HRV"]) == [100.0]
-        assert list(view._timeline_chart._values["HRV"]) == [pytest.approx(0.5)]
+        assert list(view._timeline_chart._values["HRV"]) == [pytest.approx(50.0)]
