@@ -275,7 +275,7 @@ class MainWindow(QMainWindow):
                 widget.deleteLater()
 
         repo = SessionRepository(self._db)
-        sessions = repo.get_all_sessions()
+        sessions = repo.get_completed_sessions()
 
         if not sessions:
             empty_lbl = QLabel("No recent sessions")

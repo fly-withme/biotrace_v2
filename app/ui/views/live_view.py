@@ -21,7 +21,10 @@ Dependency injection: call ``bind_session_manager()`` once after construction.
 """
 
 import time
+from collections import deque
 from pathlib import Path
+
+import numpy as np
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot, QSize
 from PyQt6.QtGui import QShortcut, QKeySequence
@@ -76,7 +79,16 @@ from app.ui.widgets.live_chart import LiveChart
 from app.ui.widgets.level_bar import LevelBar
 from app.ui.widgets.metric_card import MetricCard
 from app.ui.widgets.video_feed import VideoFeed
-from app.utils.config import CAMERA_INDEX, CLI_THRESHOLD_HIGH, CLI_THRESHOLD_LOW, USE_EYE_TRACKER
+from app.utils.config import (
+    CAMERA_INDEX,
+    STRESS_RMSSD_HIGH_DROP_PCT,
+    STRESS_RMSSD_LOW_DROP_PCT,
+    USE_EYE_TRACKER,
+    WORKLOAD_PUPIL_ROLLING_SECONDS,
+    WORKLOAD_PUPIL_SMOOTHING_SECONDS,
+    WORKLOAD_STATE_PERSIST_SECONDS,
+    WORKLOAD_THRESHOLD_FACTOR,
+)
 from app.utils.config import VIDEO_RECORDINGS_DIR
 from app.utils.logger import get_logger
 
@@ -220,8 +232,13 @@ class LiveView(QWidget):
         self._recording_path: Path | None = None
         self._current_camera_index: int = CAMERA_INDEX
         self._has_pupil_baseline: bool = False  # True once calibration sets a baseline
-        self._pdi_min_seen: float = float("inf")
-        self._pdi_max_seen: float = float("-inf")
+        self._baseline_rmssd: float = 0.0
+        self._rmssd_history: list[float] = []
+        self._pupil_smoothing_window: deque[tuple[float, float]] = deque()
+        self._pupil_rolling_window: deque[tuple[float, float]] = deque()
+        self._workload_state_is_elevated: bool = False
+        self._pending_workload_state: bool | None = None
+        self._pending_workload_since: float | None = None
         self._clock_timer = QTimer(self)
         self._clock_timer.setInterval(1000)
         self._clock_timer.timeout.connect(self._tick_clock)
@@ -486,7 +503,7 @@ class LiveView(QWidget):
 
         # Cognitive Workload Gauge
         self._workload_gauge, workload_panel = self._make_gauge_panel(
-            title="COGNITIVE WORKLOAD",
+            title="COGNITIVE LOAD",
             accent=COLOR_PRIMARY,
             track=COLOR_PRIMARY_SUBTLE
         )
@@ -494,7 +511,7 @@ class LiveView(QWidget):
 
         # Physical Stress Gauge
         self._stress_gauge, stress_panel = self._make_gauge_panel(
-            title="PHYSICAL STRESS",
+            title="STRESS",
             accent=_COLOR_CLI,
             track="#E5E7EB"
         )
@@ -516,7 +533,7 @@ class LiveView(QWidget):
         timeline_layout.setSpacing(SPACE_1)
 
         tl_header = QHBoxLayout()
-        tl_title = QLabel("SYNCHRONIZED STATE TIMELINE (REAL-TIME)")
+        tl_title = QLabel("TIMELINE")
         tl_title.setStyleSheet(
             f"color: {COLOR_FONT_MUTED}; font-size: {FONT_CAPTION}px; "
             "font-weight: 700; letter-spacing: 2px;"
@@ -560,25 +577,19 @@ class LiveView(QWidget):
 
         tl_header.addStretch()
 
-        # Legend dots
-        for label_text, color in [("WORKLOAD", _COLOR_CLI), ("HRV", _COLOR_RMSSD)]:
-            dot = QLabel("●")
-            dot.setStyleSheet(f"color: {color}; font-size: 9px;")
-            tl_header.addWidget(dot)
-            lbl = QLabel(label_text)
-            lbl.setStyleSheet(
-                f"color: {COLOR_FONT_MUTED}; font-size: {FONT_CAPTION}px; font-weight: 600;"
-            )
-            tl_header.addWidget(lbl)
-
         timeline_layout.addLayout(tl_header)
 
         self._timeline_chart = LiveChart(
-            series=["WORKLOAD", "HRV"],
-            colours=[_COLOR_CLI, _COLOR_RMSSD],
-            y_label="INDEX (%)",
-            y_range=(0.0, 1.0),
+            series=["PUPIL", "THRESHOLD", "HRV"],
+            colours=[_COLOR_PDI, COLOR_FONT_MUTED, _COLOR_RMSSD],
+            y_label="",
+            y_range=(-0.4, 1.0),
             window_seconds=180,
+            pen_styles=[
+                Qt.PenStyle.SolidLine,
+                Qt.PenStyle.DashLine,
+                Qt.PenStyle.SolidLine,
+            ],
             transparent=True,
         )
         self._timeline_chart.setMinimumHeight(CHART_HEIGHT_TIMELINE)
@@ -808,8 +819,7 @@ class LiveView(QWidget):
         logger.info("LiveView: session %d started.", session_id)
         self._session_id = session_id
         self._session_active = True
-        self._pdi_min_seen = float("inf")
-        self._pdi_max_seen = float("-inf")
+        self._rmssd_history = []
         self._sync_pupil_baseline_state()
         self._reset_widgets()
         self._start_clock()
@@ -913,16 +923,14 @@ class LiveView(QWidget):
         """
         self._rmssd_card.set_value(rmssd, timestamp)
 
-        # Map RMSSD into both HRV and stress percentages using the same range.
-        # RMSSD 20 ms → 0 % HRV / 100 % stress, RMSSD 80 ms → 100 % HRV / 0 % stress.
-        hrv_pct = max(0.0, min(100.0, ((rmssd - 20.0) / 60.0) * 100.0))
-        stress_pct = 100.0 - hrv_pct
-        self._stress_gauge.set_value(stress_pct / 100.0, f"{stress_pct:.0f}%")
-        self._cam_stress_bar.set_value(stress_pct / 100.0)
-        self._cam_stress_value.setText(f"{stress_pct:.0f}%")
+        stress_value, stress_label = self._compute_stress_state(rmssd)
+        self._stress_gauge.set_value(stress_value, stress_label)
+        self._cam_stress_bar.set_value(stress_value)
+        self._cam_stress_value.setText(stress_label)
         
-        # Feed the timeline chart with the HRV trend explicitly.
-        self._timeline_chart.append("HRV", timestamp, hrv_pct / 100.0)
+        # Feed the timeline with z-score-normalized HRV scaled into a 0-1 range.
+        self._rmssd_history.append(rmssd)
+        self._timeline_chart.append("HRV", timestamp, self._normalize_hrv_for_timeline())
 
     @pyqtSlot(float, float)
     def on_pdi_updated(self, pdi: float, timestamp: float) -> None:
@@ -942,43 +950,46 @@ class LiveView(QWidget):
         else:
             self._pupil_card.set_value(pdi, timestamp)  # raw diameter in px
 
-        # Track running min/max for workload normalization.
-        self._pdi_min_seen = min(self._pdi_min_seen, pdi)
-        self._pdi_max_seen = max(self._pdi_max_seen, pdi)
+        if not self._has_pupil_baseline:
+            return
 
-        pdi_range = self._pdi_max_seen - self._pdi_min_seen
-        if pdi_range > 0.0:
-            workload = (pdi - self._pdi_min_seen) / pdi_range
-            workload_pct = workload * 100.0
-            self._workload_gauge.set_value(workload, f"{workload_pct:.0f}%")
-            self._cam_workload_bar.set_value(workload)
-            self._cam_workload_value.setText(f"{workload_pct:.0f}%")
-            self._timeline_chart.append("WORKLOAD", timestamp, workload)
+        smoothed_pdi = self._append_window_value(
+            self._pupil_smoothing_window,
+            timestamp,
+            pdi,
+            WORKLOAD_PUPIL_SMOOTHING_SECONDS,
+        )
+        rolling_mean = self._append_window_value(
+            self._pupil_rolling_window,
+            timestamp,
+            smoothed_pdi,
+            WORKLOAD_PUPIL_ROLLING_SECONDS,
+        )
+        threshold = rolling_mean * WORKLOAD_THRESHOLD_FACTOR
+        self._update_adaptive_workload_state(smoothed_pdi, threshold, timestamp)
+
+        self._timeline_chart.append("PUPIL", timestamp, smoothed_pdi)
+        self._timeline_chart.append("THRESHOLD", timestamp, threshold)
 
     @pyqtSlot(float, float)
-    def _on_calibration_complete(self, _baseline_rmssd: float, baseline_pupil_px: float) -> None:
+    def _on_calibration_complete(self, baseline_rmssd: float, baseline_pupil_px: float) -> None:
         """Record whether a valid pupil baseline was established."""
+        self._baseline_rmssd = baseline_rmssd
         self._has_pupil_baseline = baseline_pupil_px > 0.0
         self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
         logger.info(
-            "LiveView: calibration complete — pupil baseline %.2f px (has_baseline=%s).",
-            baseline_pupil_px, self._has_pupil_baseline,
+            "LiveView: calibration complete — RMSSD baseline %.2f ms, pupil baseline %.2f px (has_baseline=%s).",
+            baseline_rmssd, baseline_pupil_px, self._has_pupil_baseline,
         )
 
     @pyqtSlot(float, float)
     def on_cli_updated(self, cli: float, timestamp: float) -> None:
-        """Receive CLI update and refresh all cognitive load displays.
+        """Receive CLI update.
 
-        Args:
-            cli: Cognitive Load Index in [0.0, 1.0].
-            timestamp: Unix timestamp of the sample.
+        The live dashboard now uses adaptive pupil-threshold classification
+        instead of fixed CLI cutoffs, so this slot remains intentionally inert.
         """
-        workload_pct = cli * 100.0
-        self._workload_gauge.set_value(cli, f"{workload_pct:.0f}%")
-        self._cam_workload_bar.set_value(cli)
-        self._cam_workload_value.setText(f"{workload_pct:.0f}%")
-        
-        self._timeline_chart.append("WORKLOAD", timestamp, cli)
+        _ = (cli, timestamp)
 
     @pyqtSlot(float, float)
     def on_bpm_updated(self, bpm: float, _timestamp: float) -> None:
@@ -1009,6 +1020,7 @@ class LiveView(QWidget):
         self._set_badge_status(self._eye_badge, "ph.eye-fill", connected)
         if not connected:
             self._pupil_card.reset()
+            self._reset_workload_state()
 
     # ------------------------------------------------------------------
     # Widget reset
@@ -1021,15 +1033,100 @@ class LiveView(QWidget):
             card.reset()
         self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
 
-        self._workload_gauge.set_value(0.0, "—")
+        self._reset_workload_state()
         self._stress_gauge.set_value(0.0, "—")
-        self._cam_workload_bar.set_value(0.0)
         self._cam_stress_bar.set_value(0.0)
-        self._cam_workload_value.setText("—")
         self._cam_stress_value.setText("—")
         self._cam_bpm_lbl.setText("—")
 
         self._timeline_chart.clear_all()
+
+    def _normalize_hrv_for_timeline(self) -> float:
+        """Scale the latest RMSSD sample into 0-1 via running z-score normalization."""
+        if not self._rmssd_history or len(self._rmssd_history) == 1:
+            return 0.5
+
+        values = np.asarray(self._rmssd_history, dtype=float)
+        std = float(values.std(ddof=0))
+        if std <= 0.0:
+            return 0.5
+
+        z_scores = (values - float(values.mean())) / std
+        z_min = float(z_scores.min())
+        z_max = float(z_scores.max())
+        if z_max - z_min <= 0.0:
+            return 0.5
+
+        return float((z_scores[-1] - z_min) / (z_max - z_min))
+
+    def _compute_stress_state(self, rmssd: float) -> tuple[float, str]:
+        """Map RMSSD change from baseline into a stress severity gauge."""
+        if self._baseline_rmssd > 0.0:
+            delta_pct = ((rmssd - self._baseline_rmssd) / self._baseline_rmssd) * 100.0
+            if delta_pct >= STRESS_RMSSD_LOW_DROP_PCT:
+                stress_value = 0.2
+            elif delta_pct >= STRESS_RMSSD_HIGH_DROP_PCT:
+                severity = (STRESS_RMSSD_LOW_DROP_PCT - delta_pct) / (
+                    STRESS_RMSSD_LOW_DROP_PCT - STRESS_RMSSD_HIGH_DROP_PCT
+                )
+                stress_value = 0.2 + severity * 0.6
+            else:
+                stress_value = 1.0
+            return float(max(0.0, min(1.0, stress_value))), f"{delta_pct:.0f}%"
+
+        hrv_pct = max(0.0, min(100.0, ((rmssd - 20.0) / 60.0) * 100.0))
+        stress_pct = 100.0 - hrv_pct
+        return stress_pct / 100.0, f"{stress_pct:.0f}%"
+
+    @staticmethod
+    def _append_window_value(
+        buffer: deque[tuple[float, float]],
+        timestamp: float,
+        value: float,
+        window_seconds: float,
+    ) -> float:
+        """Append a timestamped value and return the rolling mean over the window."""
+        buffer.append((timestamp, value))
+        cutoff = timestamp - window_seconds
+        while buffer and buffer[0][0] < cutoff:
+            buffer.popleft()
+        return float(sum(sample for _, sample in buffer) / len(buffer))
+
+    def _update_adaptive_workload_state(
+        self,
+        smoothed_pdi: float,
+        threshold: float,
+        timestamp: float,
+    ) -> None:
+        """Classify workload relative to a rolling pupil threshold."""
+        target_state = smoothed_pdi > threshold
+
+        if self._pending_workload_state != target_state:
+            self._pending_workload_state = target_state
+            self._pending_workload_since = timestamp
+
+        if (
+            self._pending_workload_since is not None
+            and timestamp - self._pending_workload_since >= WORKLOAD_STATE_PERSIST_SECONDS
+        ):
+            self._workload_state_is_elevated = target_state
+
+        gauge_value = 0.8 if self._workload_state_is_elevated else 0.3
+        gauge_label = "HIGH" if self._workload_state_is_elevated else "LOW"
+        self._workload_gauge.set_value(gauge_value, gauge_label)
+        self._cam_workload_bar.set_value(gauge_value)
+        self._cam_workload_value.setText(gauge_label)
+
+    def _reset_workload_state(self) -> None:
+        """Clear adaptive workload state between sessions or on disconnect."""
+        self._pupil_smoothing_window.clear()
+        self._pupil_rolling_window.clear()
+        self._workload_state_is_elevated = False
+        self._pending_workload_state = None
+        self._pending_workload_since = None
+        self._workload_gauge.set_value(0.0, "—")
+        self._cam_workload_bar.set_value(0.0)
+        self._cam_workload_value.setText("—")
 
     def _start_camera_recording(self) -> None:
         """Start recording automatically for the active session."""
@@ -1123,17 +1220,25 @@ class LiveView(QWidget):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(SPACE_1)
+        layout.setSpacing(SPACE_2)
 
-        gauge = DonutGauge(value=0.0, accent_color=accent, track_color=track, center_text="—", size=180)
+        gauge_size = 180
+        gauge = DonutGauge(
+            value=0.0,
+            accent_color=accent,
+            track_color=track,
+            center_text="—",
+            size=gauge_size,
+        )
         layout.addWidget(gauge, alignment=Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
 
         title_lbl = QLabel(title)
+        title_lbl.setFixedWidth(gauge_size)
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_lbl.setStyleSheet(
             f"color: {COLOR_FONT}; font-size: {FONT_SMALL}px; font-weight: 700; letter-spacing: 1.5px;"
         )
-        layout.addWidget(title_lbl)
+        layout.addWidget(title_lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch(1)
 
         return gauge, panel
@@ -1141,9 +1246,12 @@ class LiveView(QWidget):
     def _sync_pupil_baseline_state(self) -> None:
         """Mirror the current calibration baseline from SessionManager into the UI state."""
         baseline_pupil_px = 0.0
+        baseline_rmssd = 0.0
         if self._session_manager is not None:
             baseline_pupil_px = float(getattr(self._session_manager, "baseline_pupil_px", 0.0) or 0.0)
+            baseline_rmssd = float(getattr(self._session_manager, "baseline_rmssd", 0.0) or 0.0)
 
+        self._baseline_rmssd = baseline_rmssd
         self._has_pupil_baseline = baseline_pupil_px > 0.0
         self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
 

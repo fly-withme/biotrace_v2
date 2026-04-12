@@ -1,7 +1,8 @@
 """LiveChart — real-time scrolling pyqtgraph chart widget.
 
 Renders one or more named data series as continuously scrolling time-series
-plots.  The x-axis always shows the last ``window_seconds`` of data.
+plots. The x-axis shows elapsed session time while keeping the visible window
+bounded to the last ``window_seconds`` of data.
 
 Usage::
 
@@ -71,6 +72,7 @@ class LiveChart(QWidget):
         y_label: str = "",
         y_range: tuple[float, float] | None = None,
         window_seconds: int = 120,
+        pen_styles: list[Qt.PenStyle] | None = None,
         transparent: bool = False,
         parent: QWidget | None = None,
     ) -> None:
@@ -84,6 +86,7 @@ class LiveChart(QWidget):
         self._colours = colours
         self._window_seconds = window_seconds
         self._y_range = y_range
+        self._pen_styles = pen_styles or [Qt.PenStyle.SolidLine] * len(series)
         self._transparent = transparent
 
         # Data buffers — deques of (timestamp, value) pairs.
@@ -103,29 +106,26 @@ class LiveChart(QWidget):
         self._plot_widget = pg.PlotWidget()
         self._plot_widget.setBackground((0,0,0,0) if self._transparent else COLOR_CARD)
         self._plot_widget.showGrid(x=False, y=True, alpha=0.3)
-        self._plot_widget.getAxis("bottom").setLabel("Time (s)", color=COLOR_FONT_MUTED)
-        self._plot_widget.getAxis("left").setLabel(y_label, color=COLOR_FONT_MUTED)
+        self._plot_widget.getAxis("bottom").setLabel("Time", units="s", color=COLOR_FONT_MUTED)
+        self._plot_widget.getAxis("left").setLabel("", color=COLOR_FONT_MUTED)
 
-        # Style both axes.
-        for axis_name in ("bottom", "left"):
+        # Style axes and keep the chart visually minimal.
+        for axis_name in ("bottom", "left", "right"):
             axis = self._plot_widget.getAxis(axis_name)
             axis.setPen(pg.mkPen(color=COLOR_BORDER, width=1))
             axis.setTextPen(pg.mkPen(color=COLOR_FONT_MUTED))
+        self._plot_widget.showAxis("right", False)
+        self._plot_widget.getAxis("left").setStyle(showValues=False)
 
         if self._y_range is not None:
-            self._plot_widget.setYRange(*self._y_range, padding=0.05)
+            self._plot_widget.setYRange(*self._y_range, padding=0.0)
 
         # Create one PlotDataItem per series.
         self._curves: dict[str, pg.PlotDataItem] = {}
-        for name, colour in zip(self._series_names, self._colours):
-            pen = pg.mkPen(color=colour, width=2.5)
+        for name, colour, pen_style in zip(self._series_names, self._colours, self._pen_styles):
+            pen = pg.mkPen(color=colour, width=2.5, style=pen_style)
             curve = self._plot_widget.plot([], [], pen=pen, name=name)
             self._curves[name] = curve
-
-        # Legend (only shown if more than one series).
-        if len(self._series_names) > 1:
-            legend = self._plot_widget.addLegend(offset=(10, 10))
-            legend.setLabelTextColor(COLOR_FONT)
 
         layout.addWidget(self._plot_widget)
 
@@ -152,8 +152,7 @@ class LiveChart(QWidget):
     def _refresh_curve(self, series_name: str) -> None:
         """Redraw a single curve with the current buffer contents.
 
-        The x-axis is re-expressed as elapsed seconds from the most recent
-        sample so the chart always reads "0 = now, −120 = 2 min ago".
+        The x-axis is expressed as elapsed session time in seconds.
         """
         ts = list(self._timestamps[series_name])
         vals = list(self._values[series_name])
@@ -161,11 +160,13 @@ class LiveChart(QWidget):
         if not ts:
             return
 
-        latest = ts[-1]
-        relative_ts = [t - latest for t in ts]
+        start = ts[0]
+        latest = ts[-1] - start
+        relative_ts = [t - start for t in ts]
 
-        # Restrict x-axis to the visible window.
-        self._plot_widget.setXRange(-self._window_seconds, 0, padding=0)
+        # Restrict x-axis to the visible time window while keeping absolute elapsed time.
+        window_start = max(0.0, latest - self._window_seconds)
+        self._plot_widget.setXRange(window_start, max(self._window_seconds, latest), padding=0)
 
         self._curves[series_name].setData(relative_ts, vals)
 
@@ -197,5 +198,13 @@ class LiveChart(QWidget):
             seconds: New width of the visible window in seconds.
         """
         self._window_seconds = seconds
-        self._plot_widget.setXRange(-self._window_seconds, 0, padding=0)
+        max_elapsed = 0.0
+        for timestamps in self._timestamps.values():
+            if timestamps:
+                max_elapsed = max(max_elapsed, timestamps[-1] - timestamps[0])
+        self._plot_widget.setXRange(
+            max(0.0, max_elapsed - self._window_seconds),
+            max(self._window_seconds, max_elapsed),
+            padding=0,
+        )
         logger.info("LiveChart window updated to %d s", seconds)

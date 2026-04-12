@@ -2,9 +2,10 @@
 
 import os
 from datetime import datetime, timedelta
+import math
 import pytest
 from app.storage.database import DatabaseManager
-from app.analytics.performance_repository import get_session_series
+from app.analytics.performance_repository import get_session_series, z_scores_to_percentages
 
 @pytest.fixture
 def db():
@@ -111,3 +112,60 @@ def test_get_session_series_has_error_data_filtering(db):
     assert len(series) == 2
     assert series[0].has_error_data is True
     assert series[1].has_error_data is False
+
+
+def test_get_session_series_computes_dashboard_performance_score(db):
+    """Dashboard performance should combine speed and session-level errors."""
+    conn = db.get_connection()
+    fast_start = datetime(2026, 1, 1, 10, 0, 0)
+    slow_start = datetime(2026, 1, 2, 10, 0, 0)
+
+    conn.execute(
+        "INSERT INTO sessions (started_at, ended_at, error_count) VALUES (?, ?, ?)",
+        (
+            fast_start.isoformat(sep=" "),
+            (fast_start + timedelta(minutes=1)).isoformat(sep=" "),
+            0,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO sessions (started_at, ended_at, error_count) VALUES (?, ?, ?)",
+        (
+            slow_start.isoformat(sep=" "),
+            (slow_start + timedelta(minutes=2)).isoformat(sep=" "),
+            4,
+        ),
+    )
+    conn.commit()
+
+    series = get_session_series(db)
+
+    assert len(series) == 2
+    assert series[0].error_rate_per_session == pytest.approx(0.0)
+    assert series[0].performance_error == pytest.approx(0.0)
+    assert series[0].performance_score == pytest.approx(100.0)
+
+    assert series[1].error_rate_per_session == pytest.approx(4.0)
+    assert series[1].performance_error == pytest.approx(100.0)
+    assert series[1].performance_score == pytest.approx(0.0)
+
+
+def test_z_scores_to_percentages_maps_standard_scores_to_percentages():
+    """Z-score standardisation should convert comparable positions into percentages."""
+    values = [10.0, 20.0, 30.0]
+
+    percentages = z_scores_to_percentages(values)
+
+    expected = [
+        0.5 * (1.0 + math.erf(z / math.sqrt(2.0))) * 100.0
+        for z in (-1.22474487139, 0.0, 1.22474487139)
+    ]
+    assert percentages == pytest.approx(expected)
+
+
+def test_z_scores_to_percentages_inverts_and_defaults_missing_values():
+    """Missing values should stay neutral and inverted series should flip the percentile."""
+    percentages = z_scores_to_percentages([100.0, None, 200.0], invert=True)
+
+    assert percentages[0] > percentages[2]
+    assert percentages[1] == pytest.approx(50.0)

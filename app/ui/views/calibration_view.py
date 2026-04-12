@@ -630,7 +630,7 @@ class CalibrationView(QWidget):
         super().__init__(parent)
         self._session_manager = None
         self._step: str = "pupil_alignment"
-        self._eye_ready: bool = not USE_EYE_TRACKER
+        self._eye_ready: bool = True
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._baseline_remaining: int = CALIBRATION_DURATION_SECONDS
@@ -680,6 +680,31 @@ class CalibrationView(QWidget):
 
         # ── Header ──────────────────────────────────────────────────────
         header_row = QHBoxLayout()
+
+        back_btn = QPushButton("Back")
+        back_btn.setIcon(get_icon("ph.arrow-left", color=COLOR_FONT))
+        back_btn.setIconSize(QSize(16, 16))
+        back_btn.setFixedHeight(36)
+        back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        back_btn.setToolTip("Back to dashboard")
+        back_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: transparent;
+                color: {COLOR_FONT};
+                border: 1px solid {COLOR_BORDER};
+                border-radius: 18px;
+                padding: 0 14px;
+                font-size: {FONT_SMALL}px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background: {COLOR_BORDER};
+            }}
+            """
+        )
+        back_btn.clicked.connect(self._on_close)
+        header_row.addWidget(back_btn)
         header_row.addStretch()
 
         skip_btn = QPushButton()
@@ -769,10 +794,10 @@ class CalibrationView(QWidget):
         layout.addWidget(headline)
 
         instruction = QLabel(
-            "Look into the live eye feed and center your pupil inside the guide.\n"
-            "When alignment is stable, press the spacebar to continue."
+            "Position your eye inside the circle and press Spacebar or click Next."
         )
         instruction.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        instruction.setWordWrap(True)
         instruction.setStyleSheet(
             f"color: {COLOR_FONT_MUTED}; font-size: {FONT_BODY}px;"
         )
@@ -799,12 +824,19 @@ class CalibrationView(QWidget):
         )
         layout.addWidget(self._pupil_status_label)
 
-        self._pupil_hint_label = QLabel("Spacebar locked until alignment is ready")
+        self._pupil_hint_label = QLabel("Press Spacebar or click Next")
         self._pupil_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._pupil_hint_label.setStyleSheet(
             f"color: {COLOR_FONT}; font-size: {FONT_SMALL}px; font-weight: 600;"
         )
         layout.addWidget(self._pupil_hint_label)
+
+        self._next_btn = QPushButton("Next")
+        self._next_btn.setFixedSize(CALIBRATION_CTA_WIDTH, CALIBRATION_CTA_HEIGHT)
+        self._next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._next_btn.clicked.connect(self._on_space_pressed)
+        self._apply_pupil_next_style()
+        layout.addWidget(self._next_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self._content_stack.addWidget(page)
 
@@ -860,10 +892,9 @@ class CalibrationView(QWidget):
 
     @pyqtSlot()
     def _on_eye_locked(self) -> None:
-        """Unlock the handoff into the breathing step once alignment is stable."""
+        """Keep the preview informational only during pupil alignment."""
         self._eye_ready = True
-        self._pupil_status_label.setText("Alignment confirmed. Press Space to continue.")
-        self._pupil_hint_label.setText("Press Space")
+        self._pupil_status_label.setText("Preview active")
         logger.info("Eye alignment locked — waiting for user to press Space.")
 
     @pyqtSlot()
@@ -871,9 +902,8 @@ class CalibrationView(QWidget):
         """If the camera cannot open, allow the user to continue anyway."""
         self._eye_ready = True
         self._pupil_status_label.setText(
-            "Camera unavailable — grant permission in System Settings → Privacy → Camera"
+            "Camera unavailable. You can still continue manually."
         )
-        self._pupil_hint_label.setText("Press Space to continue without the preview")
         logger.warning("Eye camera unavailable; step 1 can still continue.")
 
     def _show_pupil_alignment_step(self) -> None:
@@ -884,15 +914,15 @@ class CalibrationView(QWidget):
         self._countdown_ring.hide()
         self._restart_btn.hide()
         if USE_EYE_TRACKER:
-            self._eye_ready = False
-            self._pupil_status_label.setText("Align your eye within the circular guide")
-            self._pupil_hint_label.setText("Spacebar locked until alignment is ready")
+            self._eye_ready = True
+            self._pupil_status_label.setText("Live preview available")
+            self._pupil_hint_label.setText("Press Spacebar or click Next")
             if self._eye_preview:
                 self._eye_preview.start()
         else:
             self._eye_ready = True
-            self._pupil_status_label.setText("Eye tracker disabled — press Space to continue")
-            self._pupil_hint_label.setText("Press Space")
+            self._pupil_status_label.setText("Eye tracker preview disabled")
+            self._pupil_hint_label.setText("Press Spacebar or click Next")
         self.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _show_breathing_step(self) -> None:
@@ -915,9 +945,6 @@ class CalibrationView(QWidget):
     def _on_space_pressed(self) -> None:
         """Advance from pupil alignment to breathing when Space is pressed."""
         if self._step != "pupil_alignment":
-            return
-        if not self._eye_ready:
-            self._pupil_status_label.setText("Align your eye before continuing")
             return
         self._show_breathing_step()
 
@@ -1015,6 +1042,26 @@ class CalibrationView(QWidget):
                 border-radius: {cta_radius}px;
                 font-size: 14px;
                 font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background: {COLOR_PRIMARY_HOVER};
+            }}
+            """
+        )
+
+    def _apply_pupil_next_style(self) -> None:
+        """Primary button styling for the manual pupil-step handoff."""
+        cta_radius = CALIBRATION_CTA_HEIGHT // 2
+        self._next_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {COLOR_PRIMARY};
+                color: #FFFFFF;
+                border: none;
+                border-radius: {cta_radius}px;
+                font-size: 14px;
+                font-weight: 600;
+                padding: 0 24px;
             }}
             QPushButton:hover {{
                 background: {COLOR_PRIMARY_HOVER};
@@ -1223,7 +1270,7 @@ class CalibrationView(QWidget):
         self._prestart_active = False
         self._countdown_timer.stop()
         self._step = "pupil_alignment"
-        self._eye_ready = not USE_EYE_TRACKER
+        self._eye_ready = True
         self._baseline_remaining = CALIBRATION_DURATION_SECONDS
         self._recording = False
         self._complete = False

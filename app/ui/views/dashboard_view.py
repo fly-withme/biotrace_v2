@@ -11,7 +11,6 @@ No hex literals or magic pixel values appear in this file.
 """
 
 from datetime import datetime, timedelta
-import math
 import sqlite3
 import numpy as np
 import pyqtgraph as pg
@@ -32,6 +31,8 @@ from PyQt6.QtWidgets import (
 
 from app.storage.database import DatabaseManager
 from app.storage.session_repository import SessionRepository
+from app.analytics.learning_curve import fit_schmettow
+from app.analytics.performance_repository import get_session_series, z_scores_to_percentages
 from app.ui.theme import (
     COLOR_BACKGROUND,
     COLOR_BORDER,
@@ -70,6 +71,23 @@ TOP_ROW_CARD_MIN_HEIGHT = 432
 PROGRESS_CHART_MIN_HEIGHT = 304
 
 
+class _ClickableSessionCard(QFrame):
+    """Small dashboard card that emits a click for session drill-down."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class DashboardView(QWidget):
     """Main dashboard aligned to the design in ``designs/maindashboard.png``."""
 
@@ -88,7 +106,7 @@ class DashboardView(QWidget):
         self._sessions: list[sqlite3.Row] = []
 
         self._sessions_count_label: QLabel | None = None
-        self._best_time_rows: list[tuple[QLabel, QLabel, QLabel]] = []
+        self._best_time_rows: list[tuple[_ClickableSessionCard, QLabel, QLabel, QLabel]] = []
 
         self._stress_gauge: DonutGauge | None = None
         self._error_gauge: DonutGauge | None = None
@@ -326,13 +344,16 @@ class DashboardView(QWidget):
         self._best_time_rows = []
 
         for rank in range(1, 4):
-            row_card = QFrame()
+            row_card = _ClickableSessionCard()
             row_card.setStyleSheet(
                 f"""
                 QFrame {{
-                    border: none;
+                    border: 1px solid transparent;
                     border-radius: {RADIUS_LG}px;
                     background-color: {COLOR_BACKGROUND};
+                }}
+                QFrame:hover {{
+                    border-color: {COLOR_BORDER};
                 }}
                 """
             )
@@ -368,7 +389,7 @@ class DashboardView(QWidget):
             row_layout.addLayout(top_line)
             row_layout.addWidget(session_label)
 
-            self._best_time_rows.append((meta_label, duration_label, session_label))
+            self._best_time_rows.append((row_card, meta_label, duration_label, session_label))
             layout.addWidget(row_card)
 
         layout.addStretch(1)
@@ -544,7 +565,7 @@ class DashboardView(QWidget):
     def refresh(self) -> None:
         """Reload dashboard data and refresh all widgets."""
         if self._repo is not None:
-            self._sessions = self._repo.get_all_sessions()
+            self._sessions = self._repo.get_completed_sessions()
         else:
             self._sessions = []
 
@@ -582,34 +603,41 @@ class DashboardView(QWidget):
         self._sessions_count_label.setText(str(len(self._sessions)))
 
     def _update_personal_best(self) -> None:
-        """Compute and display the top 3 fastest completed sessions."""
+        """Compute and display the top 3 best sessions by speed plus accuracy."""
         if not self._best_time_rows:
             return
 
-        durations: list[tuple[int, sqlite3.Row]] = []
-        for session in self._sessions:
-            duration_seconds = self._compute_session_duration_seconds(
-                session["started_at"],
-                session["ended_at"],
-            )
-            if duration_seconds is not None and duration_seconds > 0:
-                durations.append((duration_seconds, session))
+        session_by_id = {session["id"]: session for session in self._sessions}
+        ranked = sorted(
+            get_session_series(self._db) if self._db is not None else [],
+            key=lambda item: (
+                -(item.performance_score or 0.0),
+                item.duration_seconds,
+                item.started_at,
+            ),
+        )[:3]
 
-        best_three = sorted(durations, key=lambda item: item[0])[:3]
-
-        for idx, (meta_label, duration_label, session_label) in enumerate(self._best_time_rows, start=1):
+        for idx, (row_card, meta_label, duration_label, session_label) in enumerate(self._best_time_rows, start=1):
             meta_label.setText(f"BEST SESSION #{idx}")
-            if idx <= len(best_three):
-                duration_seconds, session_row = best_three[idx - 1]
-                duration_label.setText(self._format_seconds(duration_seconds))
-                
-                # Show name if available, otherwise date
-                name = session_row["name"] if "name" in session_row.keys() else None
+            try:
+                row_card.clicked.disconnect()
+            except TypeError:
+                pass
+
+            if idx <= len(ranked):
+                performance = ranked[idx - 1]
+                session_row = session_by_id.get(performance.session_id)
+                duration_label.setText(self._format_seconds(int(performance.duration_seconds)))
+
+                name = session_row["name"] if session_row is not None and "name" in session_row.keys() else None
                 if name:
                     session_label.setText(name)
                 else:
-                    session_date = str(session_row["started_at"]).replace("T", " ")[:10]
+                    session_date = str(performance.started_at).replace("T", " ")[:10]
                     session_label.setText(f"Session {session_date}")
+                row_card.clicked.connect(
+                    lambda sid=performance.session_id: self.session_selected.emit(sid)
+                )
             else:
                 duration_label.setText("0:00")
                 session_label.setText("Session —")
@@ -620,7 +648,7 @@ class DashboardView(QWidget):
         - Ø Stress Events: average number of stress-event samples per session.
           A stress event is any HRV sample whose RMSSD deviates >30 % from the
           calibration baseline, or any pupil sample whose |PDI| > 0.30.
-        - Ø Error Rate: average wall-contact frequency in errors per minute.
+        - Ø Error Rate: average wall contacts per completed session.
         - Ø Cognitive Load: average CLI across all sessions (CLI is 0.0–1.0).
         """
         stats = self._biometric_stats
@@ -634,14 +662,14 @@ class DashboardView(QWidget):
 
         # ── Ø Error Rate ─────────────────────────────────────────────────────
         error_rates = [
-            v["error_rate_per_min"]
+            float(v["error_count"])
             for v in stats.values()
-            if v["error_rate_per_min"] is not None
+            if v["error_count"] is not None
         ]
         avg_error_rate = sum(error_rates) / len(error_rates) if error_rates else 0.0
-        # Normalize: cap at 5 wall contacts per minute → gauge full scale.
-        _ERROR_RATE_CAP_PER_MIN = 5.0
-        error_value = min(1.0, avg_error_rate / _ERROR_RATE_CAP_PER_MIN)
+        # Normalize: cap at 5 wall contacts per session → gauge full scale.
+        _ERROR_RATE_CAP_PER_SESSION = 5.0
+        error_value = min(1.0, avg_error_rate / _ERROR_RATE_CAP_PER_SESSION)
 
         # ── Ø Cognitive Load ─────────────────────────────────────────────────
         cli_values = [v["avg_cli"] for v in stats.values() if v["avg_cli"] is not None]
@@ -651,7 +679,7 @@ class DashboardView(QWidget):
         if self._stress_gauge is not None:
             self._stress_gauge.set_value(stress_value, f"{avg_events:.0f}")
         if self._error_gauge is not None:
-            self._error_gauge.set_value(error_value, f"{avg_error_rate:.1f}/min")
+            self._error_gauge.set_value(error_value, f"{avg_error_rate:.1f}/session")
         if self._load_gauge is not None:
             self._load_gauge.set_value(load_value, f"{load_value * 100:.1f}%")
 
@@ -679,35 +707,31 @@ class DashboardView(QWidget):
         axis.setTicks([ticks])
 
     def _build_chart_series(self) -> tuple[list[float], list[float], list[float], list[str]]:
-        """Build chart values from sessions or fallback synthetic trend."""
-        if not self._sessions:
-            labels = [f"S{i + 1}" for i in range(6)]
-            x_values = [float(i) for i in range(len(labels))]
-            actual = [47.0, 63.0, 26.0, 56.0, 42.0, 58.0]
-            estimate = [86.0, 68.0, 58.0, 56.0, 56.0, 56.0]
-            return x_values, actual, estimate, labels
+        """Build chart values from completed sessions and a fitted trend."""
+        series = get_session_series(self._db) if self._db is not None else []
+        if not series:
+            return [], [], [], []
 
-        ordered = sorted(self._sessions, key=lambda row: str(row["started_at"]))
-        display = ordered[-6:]
-        x_values = [float(i) for i in range(len(display))]
+        x_values = [float(i) for i in range(len(series))]
+        actual_values = [float(item.performance_score or 0.0) for item in series]
+        labels = [str(item.session_number) for item in series]
 
         estimate_values: list[float] = []
-        actual_values: list[float] = []
-        labels: list[str] = []
+        trial_numbers = [item.session_number for item in series]
+        performance_errors = [
+            float(item.performance_error)
+            for item in series
+            if item.performance_error is not None
+        ]
+        fit = fit_schmettow(trial_numbers, performance_errors)
 
-        for i, session in enumerate(display):
-            labels.append(f"S{i + 1}")
-
-            estimate = 85.0 - min(28.0, i * 9.0)
-            estimate_values.append(max(56.0, estimate))
-
-            tlx = session["nasa_tlx_score"]
-            if tlx is None:
-                value = 47.0 + 14.0 * math.sin(i)
-            else:
-                workload = max(0.0, min(100.0, float(tlx)))
-                value = 86.0 - workload * 0.60
-            actual_values.append(max(20.0, min(92.0, value)))
+        if fit is not None:
+            estimate_values = [
+                float(max(0.0, min(100.0, predicted)))
+                for predicted in fit.predicted_performance
+            ]
+        else:
+            estimate_values = actual_values.copy()
 
         return x_values, actual_values, estimate_values, labels
 
@@ -745,14 +769,15 @@ class DashboardView(QWidget):
     def _build_analysis_series(self) -> tuple[list[float], list[float], list[float], list[str]]:
         """Build per-session average biometric trend series.
 
-        Stress series: inverted normalised average RMSSD — high RMSSD means low
-        physiological stress, so the series is flipped so that a rising line
-        indicates rising stress (falling HRV).
+        Stress series: average RMSSD standardised as a z-score and then
+        converted to a percentile-like percentage. Because higher RMSSD means
+        lower physiological stress, the z-score is inverted before converting
+        to percentages so the resulting line still rises with stress.
 
-        Workload series: average CLI per session scaled to 0–100 %.
+        Workload series: average CLI per session standardised the same way and
+        then converted into a comparable 0–100 percentage.
 
-        Both axes are expressed as percentages so the existing 0–100 % y-axis
-        labelling remains correct.
+        Missing values are rendered at a neutral 50 % midpoint.
         """
         if not self._sessions:
             x_values = [0.0, 1.0, 2.0, 3.0]
@@ -764,48 +789,14 @@ class DashboardView(QWidget):
         stats = self._biometric_stats
         ordered = sorted(self._sessions, key=lambda row: str(row["started_at"]))
         display = ordered[-12:]
+        x_values = [float(idx) for idx, _ in enumerate(display)]
+        labels = [f"S{idx + 1}" for idx, _ in enumerate(display)]
 
-        # Collect RMSSD values across displayed sessions so we can normalise
-        # them to a 0–100 % scale relative to this cohort.
-        rmssd_vals = [
-            stats[s["id"]]["avg_rmssd"]
-            for s in display
-            if s["id"] in stats and stats[s["id"]]["avg_rmssd"] is not None
-        ]
-        rmssd_min = min(rmssd_vals) if rmssd_vals else 0.0
-        rmssd_max = max(rmssd_vals) if rmssd_vals else 1.0
-        rmssd_range = (rmssd_max - rmssd_min) if rmssd_max > rmssd_min else 1.0
+        rmssd_values = [stats.get(session["id"], {}).get("avg_rmssd") for session in display]
+        cli_values = [stats.get(session["id"], {}).get("avg_cli") for session in display]
 
-        x_values: list[float] = []
-        stress_values: list[float] = []
-        workload_values: list[float] = []
-        labels: list[str] = []
-
-        for idx, session in enumerate(display):
-            x_values.append(float(idx))
-            labels.append(f"S{idx + 1}")
-
-            sid = session["id"]
-            s = stats.get(sid, {})
-
-            avg_rmssd = s.get("avg_rmssd")
-            avg_cli = s.get("avg_cli")
-
-            # Stress %: invert normalised RMSSD so that lower HRV → higher line.
-            if avg_rmssd is not None:
-                rmssd_norm = (avg_rmssd - rmssd_min) / rmssd_range  # 0 = lowest, 1 = highest
-                stress_pct = max(0.0, min(100.0, (1.0 - rmssd_norm) * 100.0))
-            else:
-                stress_pct = 50.0  # neutral placeholder when no HRV data
-
-            # Workload %: CLI is already 0–1.
-            if avg_cli is not None:
-                workload_pct = max(0.0, min(100.0, avg_cli * 100.0))
-            else:
-                workload_pct = 50.0  # neutral placeholder when no CLI data
-
-            stress_values.append(stress_pct)
-            workload_values.append(workload_pct)
+        stress_values = z_scores_to_percentages(rmssd_values, invert=True)
+        workload_values = z_scores_to_percentages(cli_values)
 
         return x_values, stress_values, workload_values, labels
 
@@ -822,8 +813,9 @@ class DashboardView(QWidget):
           samples whose |PDI| > 0.30.  An empty session contributes 0.
         - ``error_count``: raw surgical error count from the sessions table,
           or ``None`` when not yet recorded.
-        - ``error_rate_per_min``: surgical error frequency for the session,
-          derived from ``error_count / duration_minutes`` when duration is valid.
+        - ``error_count`` is reused directly for dashboard error-per-session
+          aggregation because issue #12 explicitly requested session-level
+          error averages instead of per-minute normalization.
 
         Returns:
             Dict keyed by session ID.  Always returns an entry for every
@@ -842,11 +834,6 @@ class DashboardView(QWidget):
                 "avg_cli": None,
                 "stress_events": 0,
                 "error_count": session["error_count"],
-                "error_rate_per_min": self._compute_error_rate_per_minute(
-                    session["error_count"],
-                    session["started_at"],
-                    session["ended_at"],
-                ),
             }
             for session in self._sessions
         }
@@ -920,27 +907,6 @@ class DashboardView(QWidget):
         if duration <= 0:
             return None
         return duration
-
-    @classmethod
-    def _compute_error_rate_per_minute(
-        cls,
-        error_count: int | None,
-        started_at: str | None,
-        ended_at: str | None,
-    ) -> float | None:
-        """Return wall-contact frequency as errors per minute for one session."""
-        if error_count is None:
-            return None
-
-        duration_seconds = cls._compute_session_duration_seconds(started_at, ended_at)
-        if duration_seconds is None:
-            return None
-
-        duration_minutes = duration_seconds / 60.0
-        if duration_minutes <= 0:
-            return None
-
-        return float(error_count) / duration_minutes
 
     @staticmethod
     def _format_seconds(total_seconds: int) -> str:

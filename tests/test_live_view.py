@@ -62,3 +62,36 @@ class TestLiveView:
         assert "STRESS" not in view._timeline_chart._curves
         assert list(view._timeline_chart._timestamps["HRV"]) == [100.0]
         assert list(view._timeline_chart._values["HRV"]) == [pytest.approx(0.5)]
+
+    def test_rmssd_timeline_uses_running_z_score_normalization(
+        self, qapp
+    ) -> None:
+        view = LiveView()
+
+        view.on_rmssd_updated(50.0, 100.0)
+        view.on_rmssd_updated(70.0, 101.0)
+
+        assert list(view._timeline_chart._timestamps["HRV"]) == [100.0, 101.0]
+        assert list(view._timeline_chart._values["HRV"]) == [
+            pytest.approx(0.5),
+            pytest.approx(1.0),
+        ]
+
+    def test_adaptive_workload_uses_pupil_threshold_and_persists_state(
+        self, qapp, manager: SessionManager
+    ) -> None:
+        view = LiveView()
+        manager.set_pupil_baseline(120.0)
+        view.bind_session_manager(manager)
+
+        view.on_pdi_updated(0.10, 100.0)
+        view.on_pdi_updated(0.10, 100.1)
+        assert view._workload_gauge._center_text == "LOW"
+
+        view.on_pdi_updated(0.30, 100.15)
+        assert view._workload_gauge._center_text == "LOW"
+
+        view.on_pdi_updated(0.30, 100.4)
+        assert view._workload_gauge._center_text == "HIGH"
+        assert list(view._timeline_chart._timestamps["PUPIL"]) == [100.0, 100.1, 100.15, 100.4]
+        assert len(view._timeline_chart._timestamps["THRESHOLD"]) == 4

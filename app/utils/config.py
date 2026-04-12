@@ -100,6 +100,16 @@ CLI_WEIGHT_PDI: float = 0.5
 CLI_THRESHOLD_LOW: float = 0.33     # green  → yellow boundary
 CLI_THRESHOLD_HIGH: float = 0.66    # yellow → red boundary
 
+# Adaptive pupil-workload thresholding.
+WORKLOAD_PUPIL_SMOOTHING_SECONDS: float = 1.0
+WORKLOAD_PUPIL_ROLLING_SECONDS: float = 30.0
+WORKLOAD_THRESHOLD_FACTOR: float = 0.997
+WORKLOAD_STATE_PERSIST_SECONDS: float = 0.2
+
+# Stress interpretation based on relative RMSSD change from baseline.
+STRESS_RMSSD_LOW_DROP_PCT: float = -10.0
+STRESS_RMSSD_HIGH_DROP_PCT: float = -40.0
+
 # ---------------------------------------------------------------------------
 # Mock Sensor — development / testing
 # ---------------------------------------------------------------------------
