@@ -18,6 +18,8 @@ EYE_TRACKER_BAUD: int = 115200
 
 # Eye tracker — USB camera (separate from endoscopy camera)
 EYE_TRACKER_CAMERA_INDEX: int = 0
+# Center-crop zoom used by pupil detection (1.0 disables zoom).
+EYE_PUPIL_DETECTION_ZOOM: float = 1.3
 
 CAMERA_INDEX: int = 1  # OpenCV camera index (usually 1 for external USB on laptops)
 

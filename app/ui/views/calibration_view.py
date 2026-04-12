@@ -76,6 +76,7 @@ from app.ui.theme import (
 from app.utils.config import (
     CALIBRATION_DURATION_SECONDS,
     EYE_TRACKER_CAMERA_INDEX,
+    EYE_PUPIL_DETECTION_ZOOM,
     USE_EYE_TRACKER,
 )
 from app.utils.logger import get_logger
@@ -294,6 +295,8 @@ class _EyePreviewWorker(QThread):
     # Pupil centre must fall within this fraction of the frame dimensions
     # to be accepted as "good".  0.60 = central 60 % of each axis.
     _CENTER_ZONE: float = 0.60
+    # Detect only within a compact center ROI to speed up lock acquisition.
+    _DETECTION_ROI_FRACTION: float = 0.55
 
     def __init__(self, camera_index: int) -> None:
         super().__init__()
@@ -319,8 +322,18 @@ class _EyePreviewWorker(QThread):
                 break
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            quality, cx, cy, diameter = self._detect_pupil(gray)
-            self._draw_guide(frame, gray.shape[0], gray.shape[1], quality, cx, cy, diameter)
+            quality, cx, cy, diameter, contour, ellipse = self._detect_pupil(gray)
+            self._draw_guide(
+                frame,
+                gray.shape[0],
+                gray.shape[1],
+                quality,
+                cx,
+                cy,
+                diameter,
+                contour,
+                ellipse,
+            )
 
             self.quality_changed.emit(quality)
             self.frame_ready.emit(frame.copy())
@@ -331,8 +344,15 @@ class _EyePreviewWorker(QThread):
 
     def _detect_pupil(
         self, gray: np.ndarray
-    ) -> tuple[str, float, float, float]:
-        """Detect the pupil in a grayscale frame using Otsu thresholding + moments.
+    ) -> tuple[
+        str,
+        float,
+        float,
+        float,
+        np.ndarray | None,
+        tuple[tuple[float, float], tuple[float, float], float] | None,
+    ]:
+        """Detect the pupil in a grayscale frame using contour+ellipse fitting.
 
         Uses Otsu's method so the threshold adapts automatically to the ambient
         lighting and IR intensity of the specific eye-tracker camera in use.
@@ -341,34 +361,148 @@ class _EyePreviewWorker(QThread):
         camera–eye distance and resolution).
 
         Returns:
-            Tuple of (quality, center_x, center_y, diameter_px).
+            Tuple of (quality, center_x, center_y, diameter_px, contour, ellipse).
             quality is "none" | "offcenter" | "good".
         """
         h, w = gray.shape
-        blurred = cv2.GaussianBlur(gray, (9, 9), 0)
+        zoom_factor = max(1.0, float(EYE_PUPIL_DETECTION_ZOOM))
+        zoom_x1 = 0
+        zoom_y1 = 0
+        if zoom_factor > 1.0:
+            crop_w = max(16, int(round(w / zoom_factor)))
+            crop_h = max(16, int(round(h / zoom_factor)))
+            zoom_x1 = max(0, (w - crop_w) // 2)
+            zoom_y1 = max(0, (h - crop_h) // 2)
+            zoom_x2 = min(w, zoom_x1 + crop_w)
+            zoom_y2 = min(h, zoom_y1 + crop_h)
+            gray_crop = gray[zoom_y1:zoom_y2, zoom_x1:zoom_x2]
+            gray_zoomed = cv2.resize(gray_crop, (w, h), interpolation=cv2.INTER_LINEAR)
+        else:
+            gray_zoomed = gray
 
-        # Otsu threshold — inverted so the dark pupil becomes foreground.
-        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
-        M = cv2.moments(thresh)
+        roi_w = max(32, int(w * self._DETECTION_ROI_FRACTION))
+        roi_h = max(32, int(h * self._DETECTION_ROI_FRACTION))
+        x1 = max(0, (w - roi_w) // 2)
+        y1 = max(0, (h - roi_h) // 2)
+        x2 = min(w, x1 + roi_w)
+        y2 = min(h, y1 + roi_h)
 
-        if M["m00"] < self._MIN_BLOB_AREA:
-            return "none", 0.0, 0.0, 0.0
+        gray_roi = gray_zoomed[y1:y2, x1:x2]
+        blurred = cv2.GaussianBlur(gray_roi, (9, 9), 0)
 
-        cx = M["m10"] / M["m00"]
-        cy = M["m01"] / M["m00"]
-        diameter = 2.0 * float(np.sqrt(M["m00"] / np.pi))
+        _, thresh = cv2.threshold(
+            blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
+        )
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return "none", 0.0, 0.0, 0.0, None, None
+
+        roi_h_px, roi_w_px = gray_roi.shape
+        img_area = float(roi_h_px * roi_w_px)
+        min_area = max(self._MIN_BLOB_AREA, img_area * 0.0003)
+        max_area = img_area * 0.35
+        frame_center = (float(w) / 2.0, float(h) / 2.0)
+
+        best_cnt: np.ndarray | None = None
+        best_ellipse: tuple[tuple[float, float], tuple[float, float], float] | None = None
+        best_tuple: tuple[float, float, float] | None = None
+        best_score = -1.0
+
+        for cnt in contours:
+            area = float(cv2.contourArea(cnt))
+            if area < min_area or area > max_area:
+                continue
+
+            perim = float(cv2.arcLength(cnt, True))
+            if perim <= 0.0:
+                continue
+            circularity = float((4.0 * np.pi * area) / (perim * perim))
+            if circularity < 0.2:
+                continue
+
+            if len(cnt) >= 5:
+                ellipse = cv2.fitEllipse(cnt)
+                (cx_local, cy_local), (axis_a, axis_b), _ = ellipse
+                major = float(max(axis_a, axis_b))
+                minor = float(min(axis_a, axis_b))
+                if major <= 0.0 or minor <= 0.0:
+                    continue
+                aspect = minor / major
+                diameter = (major + minor) / 2.0
+                cx = float(cx_local + x1)
+                cy = float(cy_local + y1)
+                ellipse_debug = (
+                    (cx, cy),
+                    (float(ellipse[1][0]), float(ellipse[1][1])),
+                    float(ellipse[2]),
+                )
+            else:
+                (cx_local, cy_local), radius = cv2.minEnclosingCircle(cnt)
+                diameter = float(radius) * 2.0
+                aspect = 1.0
+                cx = float(cx_local + x1)
+                cy = float(cy_local + y1)
+                ellipse_debug = (
+                    (cx, cy),
+                    (float(diameter), float(diameter)),
+                    0.0,
+                )
+
+            if aspect < 0.35:
+                continue
+            if diameter < self._MIN_DIAMETER_PX or diameter > self._MAX_DIAMETER_PX:
+                continue
+
+            dist = float(np.hypot(cx - frame_center[0], cy - frame_center[1]))
+            center_score = 1.0 - min(1.0, dist / max(1.0, np.hypot(w, h)))
+            area_score = min(1.0, area / (img_area * 0.08))
+            score = 2.0 * circularity + 1.5 * aspect + 1.2 * center_score + 0.6 * area_score
+
+            if score > best_score:
+                best_score = score
+                best_cnt = cnt
+                best_ellipse = ellipse_debug
+                best_tuple = (float(cx), float(cy), float(diameter))
+
+        if best_tuple is None or best_cnt is None or best_ellipse is None:
+            return "none", 0.0, 0.0, 0.0, None, None
+
+        cx, cy, diameter = best_tuple
+        if zoom_factor > 1.0:
+            cx = zoom_x1 + (cx / zoom_factor)
+            cy = zoom_y1 + (cy / zoom_factor)
+            diameter = diameter / zoom_factor
+            cnt = best_cnt.astype(np.float32)
+            cnt[:, :, 0] = zoom_x1 + (cnt[:, :, 0] / zoom_factor)
+            cnt[:, :, 1] = zoom_y1 + (cnt[:, :, 1] / zoom_factor)
+            best_cnt = cnt.astype(np.int32)
+            best_ellipse = (
+                (
+                    zoom_x1 + (best_ellipse[0][0] / zoom_factor),
+                    zoom_y1 + (best_ellipse[0][1] / zoom_factor),
+                ),
+                (
+                    best_ellipse[1][0] / zoom_factor,
+                    best_ellipse[1][1] / zoom_factor,
+                ),
+                best_ellipse[2],
+            )
 
         if diameter < self._MIN_DIAMETER_PX or diameter > self._MAX_DIAMETER_PX:
-            return "none", cx, cy, diameter
+            return "none", cx, cy, diameter, best_cnt, best_ellipse
 
         # Check that the pupil centre is in the central zone of the frame.
         margin_x = w * (1.0 - self._CENTER_ZONE) / 2.0
         margin_y = h * (1.0 - self._CENTER_ZONE) / 2.0
         if (cx < margin_x or cx > w - margin_x or
                 cy < margin_y or cy > h - margin_y):
-            return "offcenter", cx, cy, diameter
+            return "offcenter", cx, cy, diameter, best_cnt, best_ellipse
 
-        return "good", cx, cy, diameter
+        return "good", cx, cy, diameter, best_cnt, best_ellipse
 
     def _draw_guide(
         self,
@@ -379,6 +513,8 @@ class _EyePreviewWorker(QThread):
         cx: float,
         cy: float,
         diameter: float,
+        contour: np.ndarray | None,
+        ellipse: tuple[tuple[float, float], tuple[float, float], float] | None,
     ) -> None:
         """Draw targeting overlay and detected pupil onto the frame in-place.
 
@@ -387,9 +523,8 @@ class _EyePreviewWorker(QThread):
         """
         center = (w // 2, h // 2)
 
-        # Guide ring radius: 35 % of the shorter frame edge — large enough to
-        # be clearly visible at any camera resolution.
-        guide_r = max(12, int(min(h, w) * 0.35))
+        # Guide ring radius: smaller center target for faster alignment/lock.
+        guide_r = max(10, int(min(h, w) * 0.24))
         # Crosshair arm length: 6 % of shorter edge.
         arm = max(8, int(min(h, w) * 0.06))
 
@@ -407,12 +542,41 @@ class _EyePreviewWorker(QThread):
         # Detected pupil circle
         if diameter > 0.0:
             pupil_color = (50, 200, 80) if quality == "good" else (50, 160, 255)
+            if contour is not None:
+                cv2.drawContours(frame, [contour], -1, pupil_color, 1, cv2.LINE_AA)
+            if ellipse is not None:
+                e_center = (int(ellipse[0][0]), int(ellipse[0][1]))
+                e_axes = (
+                    max(1, int(ellipse[1][0] / 2)),
+                    max(1, int(ellipse[1][1] / 2)),
+                )
+                cv2.ellipse(
+                    frame,
+                    e_center,
+                    e_axes,
+                    float(ellipse[2]),
+                    0,
+                    360,
+                    pupil_color,
+                    2,
+                    cv2.LINE_AA,
+                )
             cv2.circle(
                 frame,
                 (int(cx), int(cy)),
                 max(1, int(diameter / 2)),
                 pupil_color,
                 2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                frame,
+                f"{diameter:.1f}px",
+                (12, h - 12),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                pupil_color,
+                1,
                 cv2.LINE_AA,
             )
 
