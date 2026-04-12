@@ -949,8 +949,10 @@ class LiveView(QWidget):
         """
         if self._has_pupil_baseline:
             pupil_pct_change = pdi
-            self._pupil_card.set_unit("%")
-            self._pupil_card.set_value(abs(pupil_pct_change), timestamp)
+            # Keep the card in pixels: display signed delta relative to baseline.
+            pupil_delta_px = (self._baseline_pupil_px * pupil_pct_change) / 100.0
+            self._pupil_card.set_unit("px")
+            self._pupil_card.set_value(pupil_delta_px, timestamp)
             workload_value, workload_label = self._compute_cognitive_load_state(pupil_pct_change)
         else:
             self._pupil_card.set_unit("px")
@@ -982,7 +984,7 @@ class LiveView(QWidget):
         self._baseline_rmssd = baseline_rmssd
         self._baseline_pupil_px = baseline_pupil_px
         self._has_pupil_baseline = baseline_pupil_px > 0.0
-        self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
+        self._pupil_card.set_unit("px")
         self._rmssd_card.set_unit("%" if self._baseline_rmssd > 0.0 else "ms")
         logger.info(
             "LiveView: calibration complete — RMSSD baseline %.2f ms, pupil baseline %.2f px (has_baseline=%s).",
@@ -1051,7 +1053,7 @@ class LiveView(QWidget):
             self._error_rate_card,
         ):
             card.reset()
-        self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
+        self._pupil_card.set_unit("px")
         self._rmssd_card.set_unit("%" if self._baseline_rmssd > 0.0 else "ms")
         self._error_rate_card.set_unit("/min")
 
@@ -1262,7 +1264,7 @@ class LiveView(QWidget):
         self._baseline_pupil_px = baseline_pupil_px
         self._baseline_rmssd = baseline_rmssd
         self._has_pupil_baseline = baseline_pupil_px > 0.0
-        self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
+        self._pupil_card.set_unit("px")
         self._rmssd_card.set_unit("%" if self._baseline_rmssd > 0.0 else "ms")
 
     @staticmethod

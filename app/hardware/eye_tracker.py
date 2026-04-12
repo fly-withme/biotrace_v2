@@ -53,7 +53,7 @@ class _PupilWorker(QThread):
             return
 
         self.connection_status_changed.emit(True, "Eye tracker connected")
-        
+
         try:
             import pypupilext as pp  # type: ignore
             detector = pp.PuRe()
@@ -77,14 +77,19 @@ class _PupilWorker(QThread):
             class FallbackPuRe:
                 def __init__(self):
                     self._prev_center = None
+                    self._prev_diameter = None
                     self._frame_index = 0
+                    self._jump_candidate = None
+                    self._jump_candidate_count = 0
 
                 def runWithConfidence(self, gray_img):
                     self._frame_index += 1
-                    # CLAHE improves pupil contrast on low-contrast IR cameras.
+
+                    # Contrast enhancement for low-contrast IR / USB eye cameras.
                     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
                     gray_img = clahe.apply(gray_img)
-                    blurred = cv2.GaussianBlur(gray_img, (9, 9), 0)
+
+                    blurred = cv2.GaussianBlur(gray_img, (7, 7), 0)
                     _, thresh = cv2.threshold(
                         blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
                     )
@@ -99,10 +104,14 @@ class _PupilWorker(QThread):
 
                     h, w = gray_img.shape
                     img_area = float(h * w)
-                    min_area = max(30.0, img_area * 0.0003)
-                    max_area = img_area * 0.12
+
+                    # Tune these bounds to your setup if needed.
+                    min_area = max(20.0, img_area * 0.00015)
+                    max_area = img_area * 0.04
+
                     frame_center = (float(w) / 2.0, float(h) / 2.0)
                     target = self._prev_center if self._prev_center is not None else frame_center
+                    prev_d = self._prev_diameter
 
                     best = None
                     best_score = -1.0
@@ -117,7 +126,7 @@ class _PupilWorker(QThread):
                             continue
 
                         circularity = float((4.0 * np.pi * area) / (perimeter * perimeter))
-                        if circularity < 0.2:
+                        if circularity < 0.45:
                             continue
 
                         if len(cnt) >= 5:
@@ -133,9 +142,9 @@ class _PupilWorker(QThread):
                             diameter = float(radius) * 2.0
                             aspect = 1.0
 
-                        if diameter < 6.0 or diameter > float(min(h, w)) * 0.35:
+                        if diameter < 5.0 or diameter > float(min(h, w)) * 0.18:
                             continue
-                        if aspect < 0.35:
+                        if aspect < 0.55:
                             continue
 
                         cnt_mask = np.zeros_like(gray_img, dtype=np.uint8)
@@ -145,19 +154,42 @@ class _PupilWorker(QThread):
 
                         dist = float(np.hypot(cx - target[0], cy - target[1]))
                         center_penalty = min(1.0, dist / max(1.0, np.hypot(w, h)))
-                        area_score = min(1.0, area / (img_area * 0.08))
+
+                        area_score = min(1.0, area / (img_area * 0.02))
+
+                        if prev_d is not None and prev_d > 0.0:
+                            diameter_ratio = diameter / prev_d
+                            diameter_jump_penalty = min(1.0, abs(np.log(max(diameter_ratio, 1e-6))) / np.log(2.0))
+                            diameter_consistency = 1.0 - diameter_jump_penalty
+                        else:
+                            diameter_ratio = 1.0
+                            diameter_consistency = 0.5
 
                         score = (
-                            2.2 * circularity
-                            + 1.4 * aspect
-                            + 1.2 * darkness
-                            + 1.2 * (1.0 - center_penalty)
-                            + 0.6 * area_score
+                            2.0 * circularity
+                            + 1.8 * aspect
+                            + 1.0 * darkness
+                            + 1.4 * (1.0 - center_penalty)
+                            + 1.1 * diameter_consistency
+                            + 0.3 * area_score
                         )
+
+                        candidate = {
+                            "cx": float(cx),
+                            "cy": float(cy),
+                            "diameter": float(diameter),
+                            "area": float(area),
+                            "circularity": float(circularity),
+                            "aspect": float(aspect),
+                            "darkness": float(darkness),
+                            "score": float(score),
+                            "diameter_ratio": float(diameter_ratio),
+                            "frame_index": int(self._frame_index),
+                        }
 
                         if score > best_score:
                             best_score = score
-                            best = (cx, cy, diameter, area, circularity, aspect, score)
+                            best = candidate
 
                     if best is None:
                         return DummyPupil(
@@ -168,21 +200,71 @@ class _PupilWorker(QThread):
                             meta={"method": "fallback", "status": "none"},
                         )
 
-                    cx, cy, diameter, area, circularity, aspect, score = best
-                    self._prev_center = (float(cx), float(cy))
+                    # Temporal plausibility check: reject impossible single-frame jumps.
+                    accept = True
+                    if prev_d is not None and prev_d > 0.0:
+                        ratio = best["diameter"] / prev_d
+                        if ratio > 1.6 or ratio < 0.62:
+                            accept = False
+
+                            jump_signature = (
+                                round(best["cx"], 1),
+                                round(best["cy"], 1),
+                                round(best["diameter"], 1),
+                            )
+
+                            if self._jump_candidate == jump_signature:
+                                self._jump_candidate_count += 1
+                            else:
+                                self._jump_candidate = jump_signature
+                                self._jump_candidate_count = 1
+
+                            # Only accept a large change if it persists for multiple frames.
+                            if self._jump_candidate_count >= 3:
+                                accept = True
+
+                            if self._frame_index % 90 == 0:
+                                logger.info(
+                                    "Fallback rejected jump candidate: d=%.2f prev=%.2f ratio=%.2f area=%.1f circ=%.2f aspect=%.2f score=%.2f",
+                                    best["diameter"],
+                                    prev_d,
+                                    ratio,
+                                    best["area"],
+                                    best["circularity"],
+                                    best["aspect"],
+                                    best["score"],
+                                )
+                        else:
+                            self._jump_candidate = None
+                            self._jump_candidate_count = 0
+
+                    if not accept:
+                        return DummyPupil(
+                            target[0],
+                            target[1],
+                            float(prev_d if prev_d is not None else 0.0),
+                            False,
+                            meta={"method": "fallback", "status": "jump_rejected"},
+                        )
+
+                    self._prev_center = (best["cx"], best["cy"])
+                    self._prev_diameter = best["diameter"]
+
                     return DummyPupil(
-                        float(cx),
-                        float(cy),
-                        float(diameter),
+                        best["cx"],
+                        best["cy"],
+                        best["diameter"],
                         True,
                         meta={
                             "method": "fallback",
                             "status": "ok",
-                            "area": float(area),
-                            "circularity": float(circularity),
-                            "aspect": float(aspect),
-                            "score": float(score),
-                            "frame_index": int(self._frame_index),
+                            "area": best["area"],
+                            "circularity": best["circularity"],
+                            "aspect": best["aspect"],
+                            "darkness": best["darkness"],
+                            "score": best["score"],
+                            "diameter_ratio": best["diameter_ratio"],
+                            "frame_index": best["frame_index"],
                         },
                     )
 
@@ -194,13 +276,15 @@ class _PupilWorker(QThread):
         last_good_diameter = None
         last_good_time = 0.0
         smoothed_center = None
+        smoothed_diameter = None
 
-        # Hyperparameters (from test_pupil.py)
+        # Hyperparameters
         roi_size = 96
         bootstrap_roi_size = 96
         alpha = 0.3
+        diameter_alpha = 0.22
         confidence_threshold = 0.35
-        hold_time = 0.5  # seconds to hold position during blinks
+        hold_time = 0.5  # seconds to hold position during blinks/loss
 
         if using_fallback:
             logger.info(
@@ -219,6 +303,7 @@ class _PupilWorker(QThread):
             zoom_factor = max(1.0, float(EYE_PUPIL_DETECTION_ZOOM))
             zoom_x1 = 0
             zoom_y1 = 0
+
             if zoom_factor > 1.0:
                 h_native, w_native = gray_native.shape
                 crop_w = max(16, int(round(w_native / zoom_factor)))
@@ -256,7 +341,7 @@ class _PupilWorker(QThread):
                     cx, cy = px + x1, py + y1
                     pupil = pupil_roi
 
-            # 2. Bootstrap in a small center ROI before trying full frame.
+            # 2. Bootstrap in a center ROI
             if pupil is None:
                 cx_mid, cy_mid = w // 2, h // 2
                 x1 = max(0, cx_mid - bootstrap_roi_size)
@@ -265,6 +350,7 @@ class _PupilWorker(QThread):
                 y2 = min(h, cy_mid + bootstrap_roi_size)
                 gray_bootstrap = gray[y1:y2, x1:x2]
                 pupil_bootstrap = detector.runWithConfidence(gray_bootstrap)
+
                 if pupil_bootstrap.valid(confidence_threshold):
                     px, py = pupil_bootstrap.center
                     cx, cy = px + x1, py + y1
@@ -281,12 +367,13 @@ class _PupilWorker(QThread):
             now = time.time()
             if pupil is not None:
                 diameter = float(pupil.diameter())
+
                 # Convert coordinates/diameter from zoomed frame back to native pixels.
                 cx = zoom_x1 + (cx / zoom_factor)
                 cy = zoom_y1 + (cy / zoom_factor)
                 diameter = diameter / zoom_factor
 
-                # Center position smoothing (EMA)
+                # Center smoothing
                 if smoothed_center is None:
                     smoothed_center = (cx, cy)
                 else:
@@ -295,11 +382,22 @@ class _PupilWorker(QThread):
                     smoothed_center = (sx, sy)
 
                 cx, cy = smoothed_center
+
+                # Diameter smoothing
+                if smoothed_diameter is None:
+                    smoothed_diameter = diameter
+                else:
+                    smoothed_diameter = (
+                        diameter_alpha * diameter
+                        + (1.0 - diameter_alpha) * smoothed_diameter
+                    )
+
+                diameter = float(smoothed_diameter)
+
                 last_good_center = (cx, cy)
                 last_good_diameter = diameter
                 last_good_time = now
 
-                # Emit monocular diameter (left=diameter, right=0.0)
                 self.raw_pupil_received.emit(float(diameter), 0.0, now)
 
                 if using_fallback:
@@ -307,25 +405,26 @@ class _PupilWorker(QThread):
                     frame_idx = int(meta.get("frame_index", 0))
                     if frame_idx > 0 and frame_idx % 120 == 0:
                         logger.info(
-                            "Fallback pupil measure: d=%.2f px cx=%.1f cy=%.1f area=%.1f circ=%.2f aspect=%.2f score=%.2f",
+                            "Fallback pupil measure: d=%.2f px cx=%.1f cy=%.1f area=%.1f circ=%.2f aspect=%.2f ratio=%.2f score=%.2f",
                             float(diameter),
                             float(cx),
                             float(cy),
                             float(meta.get("area", 0.0)),
                             float(meta.get("circularity", 0.0)),
                             float(meta.get("aspect", 0.0)),
+                            float(meta.get("diameter_ratio", 1.0)),
                             float(meta.get("score", 0.0)),
                         )
 
             elif last_good_center is not None and (now - last_good_time) < hold_time:
-                # Brief blink/loss: hold the last known position (but don't emit new diameter)
+                # Brief blink/loss: hold state briefly
                 pass
             else:
-                # Total loss of signal
                 last_good_center = None
+                last_good_diameter = None
                 smoothed_center = None
+                smoothed_diameter = None
 
-            # Cap frame rate to ~30 FPS to avoid CPU saturation
             self.msleep(33)
 
         cap.release()
