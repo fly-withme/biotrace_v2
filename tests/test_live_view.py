@@ -36,6 +36,16 @@ class TestLiveView:
         assert view._has_pupil_baseline is True
         assert view._pupil_card._unit == "%"
 
+    def test_bind_session_manager_restores_rmssd_percentage_mode(
+        self, qapp, manager: SessionManager
+    ) -> None:
+        view = LiveView()
+        manager._baseline_rmssd = 50.0
+
+        view.bind_session_manager(manager)
+
+        assert view._rmssd_card._unit == "%"
+
     def test_session_start_keeps_pupil_percentage_mode_when_baseline_exists(
         self, qapp, manager: SessionManager, monkeypatch
     ) -> None:
@@ -62,6 +72,18 @@ class TestLiveView:
         assert "STRESS" not in view._timeline_chart._curves
         assert list(view._timeline_chart._timestamps["HRV"]) == [100.0]
         assert list(view._timeline_chart._values["HRV"]) == [pytest.approx(0.5)]
+
+    def test_rmssd_card_displays_percentage_change_from_baseline(
+        self, qapp, manager: SessionManager
+    ) -> None:
+        view = LiveView()
+        manager._baseline_rmssd = 40.0
+        view.bind_session_manager(manager)
+
+        view.on_rmssd_updated(50.0, 100.0)
+
+        assert view._rmssd_card._raw_value == pytest.approx(25.0)
+        assert view._rmssd_card._unit == "%"
 
     def test_rmssd_timeline_uses_running_z_score_normalization(
         self, qapp
@@ -95,3 +117,32 @@ class TestLiveView:
         assert view._workload_gauge._center_text == "HIGH"
         assert list(view._timeline_chart._timestamps["PUPIL"]) == [100.0, 100.1, 100.15, 100.4]
         assert len(view._timeline_chart._timestamps["THRESHOLD"]) == 4
+
+    def test_pupil_card_displays_percentage_change_when_baseline_exists(
+        self, qapp, manager: SessionManager
+    ) -> None:
+        view = LiveView()
+        manager.set_pupil_baseline(120.0)
+        view.bind_session_manager(manager)
+
+        view.on_pdi_updated(0.12, 100.0)
+
+        assert view._pupil_card._raw_value == pytest.approx(12.0)
+        assert view._pupil_card._unit == "%"
+
+    def test_error_rate_card_updates_from_wall_contacts(
+        self, qapp, manager: SessionManager, monkeypatch
+    ) -> None:
+        view = LiveView()
+        view.bind_session_manager(manager)
+
+        monkeypatch.setattr(view._video_feed, "start", lambda *args, **kwargs: None)
+        monkeypatch.setattr(view, "_start_camera_recording", lambda: None)
+
+        view._on_session_started(1)
+        view._elapsed_seconds = 30
+        view.on_error_count_updated(2)
+
+        assert view._error_rate_card._name == "ERROR RATE"
+        assert view._error_rate_card._unit == "/min"
+        assert view._error_rate_card._raw_value == pytest.approx(4.0)

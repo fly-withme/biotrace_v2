@@ -10,9 +10,9 @@ Toolbar (always visible):
     ● LIVE SESSION  |  [Biofeedback]  [Camera + Bio]  |  PAUSE  END SESSION
 
 Mode Biofeedback (default, index 0 in the mode stack):
-    Top row: CORE STATE SYNTHESIS (circular gauges, 40 %) +
+    Top row: CORE STATE (circular gauges, 40 %) +
              SYNCHRONIZED STATE TIMELINE (live chart, 60 %)
-    Bottom row: 4 metric cards — PUPIL DILATION · HRV (RMSSD) · TASK SPEED · ACCURACY
+    Bottom row: 5 metric cards — PUPIL DILATION · HEART RATE · HRV (RMSSD) · TASK SPEED · ERROR RATE
 
 Mode Camera + Bio (index 1 in the mode stack):
     Full-screen camera feed with a minimal recording control bar.
@@ -233,6 +233,7 @@ class LiveView(QWidget):
         self._current_camera_index: int = CAMERA_INDEX
         self._has_pupil_baseline: bool = False  # True once calibration sets a baseline
         self._baseline_rmssd: float = 0.0
+        self._live_error_count: int = 0
         self._rmssd_history: list[float] = []
         self._pupil_smoothing_window: deque[tuple[float, float]] = deque()
         self._pupil_rolling_window: deque[tuple[float, float]] = deque()
@@ -279,6 +280,7 @@ class LiveView(QWidget):
         session_manager.pdi_updated.connect(self.on_pdi_updated)
         session_manager.cli_updated.connect(self.on_cli_updated)
         session_manager.bpm_updated.connect(self.on_bpm_updated)
+        session_manager.error_count_updated.connect(self.on_error_count_updated)
         session_manager.hrv_connection_changed.connect(self._on_hrv_connection_changed)
         session_manager.eye_connection_changed.connect(self._on_eye_connection_changed)
         session_manager.calibration_complete.connect(self._on_calibration_complete)
@@ -462,10 +464,10 @@ class LiveView(QWidget):
         """Build the Biofeedback (data-only) mode layout.
 
         Top row:
-            - CORE STATE SYNTHESIS: two circular/gauge metric cards (40 %)
+            - CORE STATE: two circular/gauge metric cards (40 %)
             - SYNCHRONIZED STATE TIMELINE: scrolling line chart (60 %)
         Bottom row:
-            - 4 metric cards: PUPIL DILATION · HRV (RMSSD) · TASK SPEED · ACCURACY
+            - 5 metric cards: PUPIL DILATION · HEART RATE · HRV (RMSSD) · TASK SPEED · ERROR RATE
         """
         widget = QWidget()
         outer = QVBoxLayout(widget)
@@ -479,14 +481,14 @@ class LiveView(QWidget):
         top_row_layout.setContentsMargins(0, 0, 0, 0)
         top_row_layout.setSpacing(0)
 
-        # Left: Core State Synthesis panel (2/5 width)
+        # Left: Core State panel (2/5 width)
         core_widget = QWidget()
         core_layout = QVBoxLayout(core_widget)
         core_layout.setContentsMargins(SPACE_3, SPACE_3, SPACE_3, SPACE_3)
         core_layout.setSpacing(SPACE_1)
 
         core_header = QHBoxLayout()
-        core_title = QLabel("CORE STATE SYNTHESIS")
+        core_title = QLabel("CORE STATE")
         core_title.setStyleSheet(
             f"color: {COLOR_FONT_MUTED}; font-size: {FONT_CAPTION}px; "
             "font-weight: 700; letter-spacing: 2px;"
@@ -598,13 +600,13 @@ class LiveView(QWidget):
         top_row_layout.addWidget(timeline_widget, stretch=2)
         outer.addWidget(top_card, stretch=1)
 
-        # ── Bottom row: 4 metric cards ──────────────────────────────────
+        # ── Bottom row: 5 metric cards ──────────────────────────────────
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(SPACE_2)
 
         self._pupil_card = MetricCard(
             name="PUPIL DILATION",
-            unit="px",
+            unit="%",
             decimals=1,
         )
         self._bpm_card = MetricCard(
@@ -615,7 +617,7 @@ class LiveView(QWidget):
         )
         self._rmssd_card = MetricCard(
             name="HRV (RMSSD)",
-            unit="ms",
+            unit="%",
             decimals=1,
             window_seconds=60.0,
         )
@@ -625,14 +627,20 @@ class LiveView(QWidget):
             decimals=0,
             show_sparkline=False,
         )
-        self._accuracy_card = MetricCard(
-            name="ACCURACY",
-            unit="%",
+        self._error_rate_card = MetricCard(
+            name="ERROR RATE",
+            unit="/min",
             decimals=1,
+            window_seconds=60.0,
         )
 
-        for card in (self._pupil_card, self._bpm_card, self._rmssd_card,
-                     self._speed_card, self._accuracy_card):
+        for card in (
+            self._pupil_card,
+            self._bpm_card,
+            self._rmssd_card,
+            self._speed_card,
+            self._error_rate_card,
+        ):
             card.setObjectName("card")
             card.setStyleSheet("background-color: transparent;")
             bottom_row.addWidget(card, stretch=1)
@@ -819,6 +827,7 @@ class LiveView(QWidget):
         logger.info("LiveView: session %d started.", session_id)
         self._session_id = session_id
         self._session_active = True
+        self._live_error_count = 0
         self._rmssd_history = []
         self._sync_pupil_baseline_state()
         self._reset_widgets()
@@ -863,6 +872,7 @@ class LiveView(QWidget):
 
         # Update TASK SPEED card with duration in seconds
         self._speed_card.set_value(float(self._elapsed_seconds))
+        self._refresh_error_rate_card()
 
         # Update camera overlay timer label
         time_str = f"{m:02d}:{s:02d}"
@@ -921,7 +931,7 @@ class LiveView(QWidget):
             rmssd: RMSSD in milliseconds.
             timestamp: Unix timestamp of the sample.
         """
-        self._rmssd_card.set_value(rmssd, timestamp)
+        self._rmssd_card.set_value(self._compute_rmssd_change_percent(rmssd), timestamp)
 
         stress_value, stress_label = self._compute_stress_state(rmssd)
         self._stress_gauge.set_value(stress_value, stress_label)
@@ -934,21 +944,13 @@ class LiveView(QWidget):
 
     @pyqtSlot(float, float)
     def on_pdi_updated(self, pdi: float, timestamp: float) -> None:
-        """Receive PDI update (or raw diameter) and refresh pupil dilation card.
-
-        When a calibration baseline exists, ``pdi`` is the Pupil Dilation Index
-        (dimensionless) and is displayed scaled to a %-like index.
-        Before calibration, ``pdi`` carries the raw diameter in px so that the
-        live view shows sensor activity even without a baseline.
+        """Receive PDI update and display it as percentage change.
 
         Args:
-            pdi: PDI ratio (with baseline) or raw diameter in px (without baseline).
+            pdi: Pupil Dilation Index expressed as a ratio from baseline.
             timestamp: Unix timestamp of the sample.
         """
-        if self._has_pupil_baseline:
-            self._pupil_card.set_value(pdi * 100.0, timestamp)  # display as %-like index
-        else:
-            self._pupil_card.set_value(pdi, timestamp)  # raw diameter in px
+        self._pupil_card.set_value(pdi * 100.0, timestamp)
 
         if not self._has_pupil_baseline:
             return
@@ -976,7 +978,8 @@ class LiveView(QWidget):
         """Record whether a valid pupil baseline was established."""
         self._baseline_rmssd = baseline_rmssd
         self._has_pupil_baseline = baseline_pupil_px > 0.0
-        self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
+        self._pupil_card.set_unit("%")
+        self._rmssd_card.set_unit("%")
         logger.info(
             "LiveView: calibration complete — RMSSD baseline %.2f ms, pupil baseline %.2f px (has_baseline=%s).",
             baseline_rmssd, baseline_pupil_px, self._has_pupil_baseline,
@@ -1001,6 +1004,12 @@ class LiveView(QWidget):
         """
         self._bpm_card.set_value(bpm, _timestamp)
         self._cam_bpm_lbl.setText(f"{bpm:.0f}")
+
+    @pyqtSlot(int)
+    def on_error_count_updated(self, error_count: int) -> None:
+        """Refresh the live error-rate card after each wall contact."""
+        self._live_error_count = max(0, int(error_count))
+        self._refresh_error_rate_card()
 
     @pyqtSlot(bool, str)
     def _on_hrv_connection_changed(self, connected: bool, _message: str) -> None:
@@ -1028,10 +1037,18 @@ class LiveView(QWidget):
 
     def _reset_widgets(self) -> None:
         """Clear all metric cards and charts before a new session."""
-        for card in (self._pupil_card, self._bpm_card, self._rmssd_card,
-                     self._speed_card, self._accuracy_card):
+        self._live_error_count = 0
+        for card in (
+            self._pupil_card,
+            self._bpm_card,
+            self._rmssd_card,
+            self._speed_card,
+            self._error_rate_card,
+        ):
             card.reset()
-        self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
+        self._pupil_card.set_unit("%")
+        self._rmssd_card.set_unit("%")
+        self._error_rate_card.set_unit("/min")
 
         self._reset_workload_state()
         self._stress_gauge.set_value(0.0, "—")
@@ -1040,6 +1057,23 @@ class LiveView(QWidget):
         self._cam_bpm_lbl.setText("—")
 
         self._timeline_chart.clear_all()
+
+    def _compute_rmssd_change_percent(self, rmssd: float) -> float:
+        """Express RMSSD as percentage change from the baseline when available."""
+        if self._baseline_rmssd > 0.0:
+            return ((rmssd - self._baseline_rmssd) / self._baseline_rmssd) * 100.0
+
+        return max(0.0, min(100.0, ((rmssd - 20.0) / 60.0) * 100.0))
+
+    def _refresh_error_rate_card(self) -> None:
+        """Update the live wall-contact rate based on elapsed session time."""
+        elapsed_minutes = self._elapsed_seconds / 60.0
+        if elapsed_minutes <= 0.0:
+            rate = 0.0
+        else:
+            rate = self._live_error_count / elapsed_minutes
+
+        self._error_rate_card.set_value(rate)
 
     def _normalize_hrv_for_timeline(self) -> float:
         """Scale the latest RMSSD sample into 0-1 via running z-score normalization."""
@@ -1230,8 +1264,6 @@ class LiveView(QWidget):
             center_text="—",
             size=gauge_size,
         )
-        layout.addWidget(gauge, alignment=Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-
         title_lbl = QLabel(title)
         title_lbl.setFixedWidth(gauge_size)
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1239,6 +1271,8 @@ class LiveView(QWidget):
             f"color: {COLOR_FONT}; font-size: {FONT_SMALL}px; font-weight: 700; letter-spacing: 1.5px;"
         )
         layout.addWidget(title_lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        layout.addWidget(gauge, alignment=Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         layout.addStretch(1)
 
         return gauge, panel
@@ -1253,7 +1287,8 @@ class LiveView(QWidget):
 
         self._baseline_rmssd = baseline_rmssd
         self._has_pupil_baseline = baseline_pupil_px > 0.0
-        self._pupil_card.set_unit("%" if self._has_pupil_baseline else "px")
+        self._pupil_card.set_unit("%")
+        self._rmssd_card.set_unit("%")
 
     @staticmethod
     def _make_card() -> QFrame:

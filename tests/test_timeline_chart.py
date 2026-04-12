@@ -58,6 +58,33 @@ class TestTimelineChart:
         assert not chart._empty_label.isHidden()
         assert chart._plot_widget.isHidden()
 
+    def test_load_session_converts_extreme_values_to_readable_percentages(self, chart: TimelineChart, db: DatabaseManager) -> None:
+        repo = SessionRepository(db)
+        cal_repo = CalibrationRepository(db)
+        sid = repo.create_session(datetime.now(tz=timezone.utc))
+        cal_repo.save_calibration(sid, 1.0, 0.0, 60)
+        cal_repo.save_hrv_samples_bulk(
+            sid,
+            [(0.0, 800.0, 1.0, 75.0, 0.0), (1.0, 820.0, 2.0, 73.0, 2.0)],
+        )
+        cal_repo.save_pupil_samples_bulk(
+            sid,
+            [(0.5, 3.1, 3.0, 8.0), (1.5, 3.2, 3.1, 12.0)],
+        )
+
+        chart.load_session(db, sid)
+
+        assert max(chart._stress_curve.yData) <= 100.0
+        assert min(chart._stress_curve.yData) >= 0.0
+        assert max(chart._pupil_curve.yData) <= 100.0
+        assert min(chart._pupil_curve.yData) >= 0.0
+
+    def test_set_playhead_ms_updates_persistent_label(self, chart: TimelineChart) -> None:
+        chart.set_playhead_ms(2500.0)
+
+        assert chart._playhead_line.value() == pytest.approx(2.5)
+        assert "2.5s" in chart._playhead_label.toPlainText()
+
 
 class TestLiveChartStyling:
     def test_live_chart_hides_right_axis_and_legend(self, qapp) -> None:

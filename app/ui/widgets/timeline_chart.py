@@ -22,6 +22,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
+from app.analytics.performance_repository import z_scores_to_percentages
 from app.storage.database import DatabaseManager
 from app.ui.theme import (
     COLOR_BORDER,
@@ -51,6 +52,7 @@ class TimelineChart(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._stress_marker_timestamps_ms: list[float] = []
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -58,11 +60,7 @@ class TimelineChart(QWidget):
     # ------------------------------------------------------------------
 
     def load_session(self, db: DatabaseManager, session_id: int) -> None:
-        """Query the database and plot normalised series for the given session.
-
-        RMSSD is expressed as percent change from the calibration baseline.
-        PDI is expressed as percent change (pdi × 100) — it is already a
-        fractional deviation from the resting pupil diameter.
+        """Query the database and plot readable scaled series for the session.
 
         Args:
             db: Database manager instance.
@@ -89,6 +87,7 @@ class TimelineChart(QWidget):
 
         stress_x: list[float] = []
         stress_y: list[float] = []
+        self._stress_marker_timestamps_ms = []
 
         if hrv_rows:
             rmssd_vals = [float(r["rmssd"]) for r in hrv_rows]
@@ -98,7 +97,13 @@ class TimelineChart(QWidget):
             )
             if ref and ref > 0:
                 stress_x = [float(r["timestamp"]) for r in hrv_rows]
-                stress_y = [(v - ref) / ref * 100.0 for v in rmssd_vals]
+                stress_delta = [(v - ref) / ref * 100.0 for v in rmssd_vals]
+                stress_y = self._to_readable_percentages(stress_delta, invert=True)
+                self._stress_marker_timestamps_ms = [
+                    float(r["timestamp"]) * 1000.0
+                    for r, v in zip(hrv_rows, rmssd_vals)
+                    if v < ref * 0.60
+                ]
 
         # ── Pupil Dilation (PDI) as % change ─────────────────────────
         pupil_rows = conn.execute(
@@ -112,7 +117,8 @@ class TimelineChart(QWidget):
 
         if pupil_rows:
             pupil_x = [float(r["timestamp"]) for r in pupil_rows]
-            pupil_y = [float(r["pdi"]) * 100.0 for r in pupil_rows]
+            pupil_raw = [float(r["pdi"]) for r in pupil_rows]
+            pupil_y = self._to_readable_percentages(pupil_raw)
 
         if not stress_x and not pupil_x:
             self._show_empty_state(True)
@@ -128,7 +134,7 @@ class TimelineChart(QWidget):
 
         self._plot_item.autoRange()
         logger.info(
-            "TimelineChart loaded session %d: %d RMSSD %%, %d PDI %% points",
+            "TimelineChart loaded session %d: %d RMSSD points, %d PDI points",
             session_id, len(stress_x), len(pupil_x),
         )
 
@@ -150,13 +156,23 @@ class TimelineChart(QWidget):
         Args:
             position_ms: Video position in milliseconds.
         """
-        self._playhead_line.setPos(position_ms / 1000.0)
+        seconds = position_ms / 1000.0
+        self._playhead_line.setPos(seconds)
+        self._playhead_label.setText(f"{seconds:.1f}s")
+        self._playhead_label.setPos(seconds, 98.0)
+
+    def get_stress_marker_timestamps_ms(self) -> list[float]:
+        """Return severe stress-event timestamps in milliseconds."""
+        return self._stress_marker_timestamps_ms.copy()
 
     def clear(self) -> None:
         """Reset the chart to an empty state."""
         self._stress_curve.setData([], [])
         self._pupil_curve.setData([], [])
         self._playhead_line.setPos(0)
+        self._playhead_label.setText("0.0s")
+        self._playhead_label.setPos(0, 98.0)
+        self._stress_marker_timestamps_ms = []
         self._show_empty_state(True)
 
     # ------------------------------------------------------------------
@@ -179,7 +195,32 @@ class TimelineChart(QWidget):
             if self._plot_item.sceneBoundingRect().contains(pos):
                 mouse_point = self._plot_item.vb.mapSceneToView(pos)
                 timestamp_s = mouse_point.x()
+                self.set_playhead_ms(max(0.0, timestamp_s * 1000.0))
                 self.timestamp_clicked.emit(max(0.0, timestamp_s * 1000.0))
+
+    @staticmethod
+    def _to_readable_percentages(values: list[float], invert: bool = False) -> list[float]:
+        """Convert percent-change or z-score-like values to 0-100 percentages."""
+        if not values:
+            return []
+
+        finite = [float(value) for value in values if np.isfinite(value)]
+        if not finite:
+            return [50.0 for _ in values]
+
+        if any(abs(value) > 5.0 for value in finite):
+            lo = min(finite)
+            hi = max(finite)
+            if hi == lo:
+                readable = [50.0 for _ in values]
+            else:
+                readable = [((float(value) - lo) / (hi - lo)) * 100.0 for value in values]
+                if invert:
+                    readable = [100.0 - value for value in readable]
+        else:
+            readable = z_scores_to_percentages([float(value) for value in values], invert=invert)
+
+        return [float(max(0.0, min(100.0, value))) for value in readable]
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -211,7 +252,7 @@ class TimelineChart(QWidget):
         self._plot_item = self._plot_widget.getPlotItem()
         self._plot_item.setLabel("bottom", "Time", units="s", color=COLOR_FONT_MUTED)
         self._plot_item.setLabel(
-            "left", "% Change from Baseline", color=COLOR_FONT_MUTED
+            "left", "Relative Intensity (%)", color=COLOR_FONT_MUTED
         )
 
         # Add a zero-baseline reference line.
@@ -243,6 +284,16 @@ class TimelineChart(QWidget):
             pen=pg.mkPen(color="#AAAAAA", width=2),
         )
         self._plot_item.addItem(self._playhead_line, ignoreBounds=True)
+        self._playhead_label = pg.TextItem(
+            text="0.0s",
+            color=COLOR_FONT_MUTED,
+            anchor=(0, 1),
+        )
+        self._playhead_label.setPos(0, 98.0)
+        font = self.font()
+        font.setBold(True)
+        self._playhead_label.setFont(font)
+        self._plot_item.addItem(self._playhead_label, ignoreBounds=True)
 
         # ── Hover hairline (follows mouse) ─────────────────────────────
         self._v_line = pg.InfiniteLine(

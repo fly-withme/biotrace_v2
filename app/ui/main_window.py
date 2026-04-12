@@ -99,6 +99,7 @@ class MainWindow(QMainWindow):
         self._post_session_view.back_to_dashboard.connect(lambda: self.navigate_to(0))
         self._post_session_view.new_session_requested.connect(self._on_new_session_requested)
         self._post_session_view.session_renamed.connect(lambda sid, name: self._populate_recent_sessions())
+        self._post_session_view.session_deleted.connect(self._on_session_deleted)
 
         self.navigate_to(0)
         logger.info("MainWindow initialised.")
@@ -387,3 +388,9 @@ class MainWindow(QMainWindow):
         self._dashboard_view.refresh()
         self._populate_recent_sessions()
         logger.info("Session %d ended — navigated to Post-Session view.", session_id)
+
+    def _on_session_deleted(self, session_id: int) -> None:
+        """Refresh dashboard/sidebar after a post-session deletion."""
+        self._dashboard_view.refresh()
+        self._populate_recent_sessions()
+        logger.info("Session %d deleted — refreshed dashboard state.", session_id)

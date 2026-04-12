@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from PyQt6.QtWidgets import QApplication
 
+from app.storage.calibration_repository import CalibrationRepository
 from app.storage.database import DatabaseManager
 from app.ui.views.dashboard_view import DashboardView
 
@@ -45,8 +46,8 @@ def test_dashboard_error_gauge_shows_average_errors_per_session(
     view.show()
     qapp.processEvents()
 
-    assert view._error_gauge is not None
-    assert view._error_gauge._center_text == "3.5/session"
+    assert view._error_value_label is not None
+    assert view._error_value_label.text() == "3.5"
 
     view.close()
 
@@ -125,5 +126,40 @@ def test_build_analysis_series_uses_z_score_percentages(
     assert workload_values[0] < workload_values[1]
     assert stress_values == pytest.approx([84.1344746, 15.8655254])
     assert workload_values == pytest.approx([15.8655254, 84.1344746])
+
+    view.close()
+
+
+def test_dashboard_stress_events_use_rmssd_drop_over_40_percent(
+    db: DatabaseManager, qapp: QApplication
+) -> None:
+    """Stress events should count only severe RMSSD drops relative to baseline."""
+    conn = db.get_connection()
+    start = datetime(2026, 1, 1, 10, 0, 0)
+
+    conn.execute(
+        "INSERT INTO sessions (id, started_at, ended_at) VALUES (?, ?, ?)",
+        (1, start.isoformat(sep=" "), (start + timedelta(minutes=3)).isoformat(sep=" ")),
+    )
+    CalibrationRepository(db).save_calibration(1, 100.0, 0.0, 60)
+    conn.execute(
+        "INSERT INTO hrv_samples (session_id, timestamp, rr_interval, rmssd) VALUES (1, 1, 800, 70.0)"
+    )
+    conn.execute(
+        "INSERT INTO hrv_samples (session_id, timestamp, rr_interval, rmssd) VALUES (1, 2, 800, 59.0)"
+    )
+    conn.execute(
+        "INSERT INTO pupil_samples (session_id, timestamp, left_diameter, right_diameter, pdi) VALUES (1, 1, 0, 0, 0.9)"
+    )
+    conn.commit()
+
+    view = DashboardView(db=db)
+    view.show()
+    qapp.processEvents()
+
+    stats = view._load_biometric_stats()
+    assert stats[1]["stress_events"] == 1
+    assert view._stress_value_label is not None
+    assert view._stress_value_label.text() == "1"
 
     view.close()

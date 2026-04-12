@@ -8,7 +8,7 @@ from pathlib import Path
 
 import cv2
 from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -37,6 +37,38 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+class _MarkerSlider(QSlider):
+    """Slider that can render vertical event markers."""
+
+    def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
+        super().__init__(orientation, parent)
+        self._marker_positions_ms: list[float] = []
+
+    def set_markers(self, marker_positions_ms: list[float]) -> None:
+        self._marker_positions_ms = marker_positions_ms
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if not self._marker_positions_ms or self.maximum() <= 0:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(COLOR_PRIMARY, 2))
+
+        left = 12
+        right = self.width() - 12
+        track_width = max(1, right - left)
+        top = max(2, self.rect().center().y() - 10)
+        bottom = min(self.height() - 2, self.rect().center().y() + 10)
+
+        for marker_ms in self._marker_positions_ms:
+            ratio = max(0.0, min(1.0, marker_ms / float(self.maximum())))
+            x = left + int(track_width * ratio)
+            painter.drawLine(x, top, x, bottom)
+
+
 class VideoPlayer(QWidget):
     """A self-contained video playback widget using OpenCV and QTimer.
 
@@ -58,6 +90,7 @@ class VideoPlayer(QWidget):
         self._duration_ms: float = 0.0
         self._is_playing: bool = False
         self._is_scrubbing: bool = False
+        self._stress_markers_ms: list[float] = []
 
         self._build_ui()
 
@@ -93,6 +126,7 @@ class VideoPlayer(QWidget):
 
         self._slider.setRange(0, int(self._duration_ms))
         self._slider.setValue(0)
+        self._slider.set_markers(self._stress_markers_ms)
         self._update_time_label(0)
 
         self._controls_container.show()
@@ -138,6 +172,11 @@ class VideoPlayer(QWidget):
         self.pause()
         if self._cap:
             self.seek_to(0)
+
+    def set_stress_markers(self, marker_positions_ms: list[float]) -> None:
+        """Display stress-event markers on the playback slider."""
+        self._stress_markers_ms = marker_positions_ms
+        self._slider.set_markers(marker_positions_ms)
 
     # ------------------------------------------------------------------
     # Internal Logic
@@ -258,7 +297,7 @@ class VideoPlayer(QWidget):
         self._play_btn.clicked.connect(self._on_play_toggle)
         ctrl_layout.addWidget(self._play_btn)
 
-        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider = _MarkerSlider(Qt.Orientation.Horizontal)
         self._slider.sliderPressed.connect(self._on_slider_pressed)
         self._slider.sliderMoved.connect(self._on_slider_moved)
         self._slider.sliderReleased.connect(self._on_slider_released)

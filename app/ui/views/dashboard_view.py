@@ -60,8 +60,6 @@ from app.ui.theme import (
     GRID_GUTTER,
     get_icon,
 )
-from app.ui.widgets.level_bar import LevelBar
-from app.ui.widgets.donut_gauge import DonutGauge
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -108,9 +106,9 @@ class DashboardView(QWidget):
         self._sessions_count_label: QLabel | None = None
         self._best_time_rows: list[tuple[_ClickableSessionCard, QLabel, QLabel, QLabel]] = []
 
-        self._stress_gauge: DonutGauge | None = None
-        self._error_gauge: DonutGauge | None = None
-        self._load_gauge: DonutGauge | None = None
+        self._stress_value_label: QLabel | None = None
+        self._error_value_label: QLabel | None = None
+        self._load_value_label: QLabel | None = None
 
         # Per-session biometric stats cached on each refresh() call.
         # Keys are session IDs; see _load_biometric_stats() for the dict schema.
@@ -180,16 +178,16 @@ class DashboardView(QWidget):
         top_row.addWidget(personal_card, stretch=1)
         content_layout.addLayout(top_row)
 
-        # ── Row 2: Three KPI gauge cards ───────────────────────────────────
+        # ── Row 2: Three KPI summary cards ─────────────────────────────────
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(GRID_GUTTER)
         for kwargs in (
-              dict(title="Ø Stress Events", accent=COLOR_PRIMARY, track=COLOR_PRIMARY_SUBTLE, key="stress"),
-              dict(title="Ø Error Rate", accent=COLOR_DANGER, track=COLOR_DANGER_BG, key="error"),
-              dict(title="Ø Cognitive Load", accent=COLOR_WARNING, track=COLOR_WARNING_BG, key="load"),
+              dict(title="Avg Stress Events", accent=COLOR_PRIMARY, icon_name="ph.heartbeat-fill", key="stress"),
+              dict(title="Avg Error Rate", accent=COLOR_DANGER, icon_name="ph.crosshair", key="error"),
+              dict(title="Avg Cognitive Load", accent=COLOR_WARNING, icon_name="ph.brain-fill", key="load"),
         ):
             card = self._make_metric_card(**kwargs)
-            card.setMinimumHeight(300)
+            card.setMinimumHeight(220)
             bottom_row.addWidget(card)
         content_layout.addLayout(bottom_row)
 
@@ -325,7 +323,7 @@ class DashboardView(QWidget):
             f"""
             QFrame#card {{
                 background-color: transparent;
-                border: none;
+                border: 1px solid {COLOR_BORDER};
                 border-radius: {RADIUS_LG}px;
             }}
             """
@@ -348,12 +346,9 @@ class DashboardView(QWidget):
             row_card.setStyleSheet(
                 f"""
                 QFrame {{
-                    border: 1px solid transparent;
+                    border: 1px solid {COLOR_BORDER};
                     border-radius: {RADIUS_LG}px;
                     background-color: {COLOR_BACKGROUND};
-                }}
-                QFrame:hover {{
-                    border-color: {COLOR_BORDER};
                 }}
                 """
             )
@@ -399,20 +394,35 @@ class DashboardView(QWidget):
         self,
         title: str,
         accent: str,
-        track: str,
+        icon_name: str,
         key: str,
     ) -> QFrame:
-        """Create one of the bottom circular KPI cards."""
+        """Create one of the bottom dashboard KPI summary cards."""
         card = self._make_card()
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(SPACE_3, SPACE_2, SPACE_3, SPACE_3)
+        card.setStyleSheet(
+            f"""
+            QFrame#card {{
+                background-color: transparent;
+                border: 1px solid {COLOR_BORDER};
+                border-radius: {RADIUS_LG}px;
+            }}
+            """
+        )
+        card_layout.setContentsMargins(SPACE_3, SPACE_3, SPACE_3, SPACE_3)
         card_layout.setSpacing(SPACE_1)
 
-        card_layout.addStretch(1)
-        gauge = DonutGauge(value=0.0, accent_color=accent, track_color=track, center_text="0.0", half_circle=True)
-        gauge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        card_layout.addWidget(gauge, alignment=Qt.AlignmentFlag.AlignHCenter)
-        card_layout.addStretch(1)
+        icon_label = QLabel()
+        icon_label.setPixmap(get_icon(icon_name, color=accent).pixmap(28, 28))
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        card_layout.addWidget(icon_label)
+
+        value_label = QLabel("—")
+        value_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        value_label.setStyleSheet(
+            f"color: {accent}; font-size: {FONT_HEADING_2 + 12}px; font-weight: 700;"
+        )
+        card_layout.addWidget(value_label)
 
         title_label = QLabel(title)
         title_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -420,13 +430,14 @@ class DashboardView(QWidget):
             f"color: {COLOR_FONT}; font-size: {CARD_TITLE_FONT_SIZE}px; font-weight: 700;"
         )
         card_layout.addWidget(title_label)
+        card_layout.addStretch(1)
 
         if key == "stress":
-            self._stress_gauge = gauge
+            self._stress_value_label = value_label
         elif key == "error":
-            self._error_gauge = gauge
+            self._error_value_label = value_label
         else:
-            self._load_gauge = gauge
+            self._load_value_label = value_label
 
         return card
 
@@ -645,9 +656,8 @@ class DashboardView(QWidget):
     def _update_gauges(self) -> None:
         """Map real biometric session data to the three bottom KPI gauges.
 
-        - Ø Stress Events: average number of stress-event samples per session.
-          A stress event is any HRV sample whose RMSSD deviates >30 % from the
-          calibration baseline, or any pupil sample whose |PDI| > 0.30.
+        - Ø Stress Events: average number of RMSSD drops >40 % from baseline
+          per completed session.
         - Ø Error Rate: average wall contacts per completed session.
         - Ø Cognitive Load: average CLI across all sessions (CLI is 0.0–1.0).
         """
@@ -656,10 +666,6 @@ class DashboardView(QWidget):
         # ── Ø Stress Events ──────────────────────────────────────────────────
         event_counts = [v["stress_events"] for v in stats.values()]
         avg_events = sum(event_counts) / len(event_counts) if event_counts else 0.0
-        # Normalize: cap at 200 stress-event samples → gauge full scale.
-        _STRESS_EVENT_CAP = 200
-        stress_value = min(1.0, avg_events / _STRESS_EVENT_CAP)
-
         # ── Ø Error Rate ─────────────────────────────────────────────────────
         error_rates = [
             float(v["error_count"])
@@ -667,21 +673,17 @@ class DashboardView(QWidget):
             if v["error_count"] is not None
         ]
         avg_error_rate = sum(error_rates) / len(error_rates) if error_rates else 0.0
-        # Normalize: cap at 5 wall contacts per session → gauge full scale.
-        _ERROR_RATE_CAP_PER_SESSION = 5.0
-        error_value = min(1.0, avg_error_rate / _ERROR_RATE_CAP_PER_SESSION)
 
         # ── Ø Cognitive Load ─────────────────────────────────────────────────
         cli_values = [v["avg_cli"] for v in stats.values() if v["avg_cli"] is not None]
         avg_cli = sum(cli_values) / len(cli_values) if cli_values else 0.0
-        load_value = min(1.0, max(0.0, avg_cli))
 
-        if self._stress_gauge is not None:
-            self._stress_gauge.set_value(stress_value, f"{avg_events:.0f}")
-        if self._error_gauge is not None:
-            self._error_gauge.set_value(error_value, f"{avg_error_rate:.1f}/session")
-        if self._load_gauge is not None:
-            self._load_gauge.set_value(load_value, f"{load_value * 100:.1f}%")
+        if self._stress_value_label is not None:
+            self._stress_value_label.setText(f"{avg_events:.0f}")
+        if self._error_value_label is not None:
+            self._error_value_label.setText(f"{avg_error_rate:.1f}")
+        if self._load_value_label is not None:
+            self._load_value_label.setText(f"{avg_cli * 100:.1f}%")
 
     def _update_progress_plot(self) -> None:
         """Update progress chart data and x-axis labels."""
@@ -808,9 +810,8 @@ class DashboardView(QWidget):
 
         - ``avg_rmssd``: mean RMSSD over the session (ms), or ``None``.
         - ``avg_cli``:   mean CLI over the session (0–1), or ``None``.
-        - ``stress_events``: number of HRV samples whose RMSSD deviates
-          >30 % from the calibration baseline **plus** the number of pupil
-          samples whose |PDI| > 0.30.  An empty session contributes 0.
+        - ``stress_events``: number of HRV samples whose RMSSD drops >40 %
+          below the calibration baseline. An empty session contributes 0.
         - ``error_count``: raw surgical error count from the sessions table,
           or ``None`` when not yet recorded.
         - ``error_count`` is reused directly for dashboard error-per-session
@@ -862,26 +863,18 @@ class DashboardView(QWidget):
             if row[0] not in baselines:
                 baselines[row[0]] = float(row[1])
 
-        # ── HRV stress events: |rmssd − baseline| / baseline > 0.30 ─────────
+        # ── HRV stress events: RMSSD drop > 40 % from baseline ──────────────
         for sid, baseline_rmssd in baselines.items():
             if sid not in stats or baseline_rmssd <= 0:
                 continue
             row = conn.execute(
                 "SELECT COUNT(*) FROM hrv_samples "
                 "WHERE session_id = ? AND rmssd IS NOT NULL "
-                "  AND ABS(rmssd - ?) / ? > 0.30",
-                (sid, baseline_rmssd, baseline_rmssd),
+                "  AND rmssd < ? * 0.60",
+                (sid, baseline_rmssd),
             ).fetchone()
             if row and row[0]:
                 stats[sid]["stress_events"] += int(row[0])
-
-        # ── Pupil stress events: |PDI| > 0.30 ───────────────────────────────
-        for row in conn.execute(
-            "SELECT session_id, COUNT(*) FROM pupil_samples "
-            "WHERE pdi IS NOT NULL AND ABS(pdi) > 0.30 GROUP BY session_id"
-        ).fetchall():
-            if row[0] in stats:
-                stats[row[0]]["stress_events"] += int(row[1])
 
         logger.debug(
             "Biometric stats loaded for %d sessions.", len(stats)

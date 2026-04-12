@@ -246,6 +246,8 @@ class MetricCard(QFrame):
             return "ph.lightning-fill"
         if "ACCURACY" in upper:
             return "ph.target-fill"
+        if "ERROR" in upper:
+            return "ph.warning-circle-fill"
         if "WORKLOAD" in upper:
             return "ph.brain-fill"
         return "ph.activity"

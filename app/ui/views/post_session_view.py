@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QLineEdit,
     QPushButton,
     QScrollArea,
@@ -84,6 +85,7 @@ class PostSessionView(QWidget):
     back_to_dashboard = pyqtSignal()
     new_session_requested = pyqtSignal()
     session_renamed = pyqtSignal(int, str)
+    session_deleted = pyqtSignal(int)
 
     def __init__(
         self,
@@ -193,6 +195,9 @@ class PostSessionView(QWidget):
 
         # ── Timeline Data ──────────────────────────────────────────────
         self._timeline_chart.load_session(self._db, session_id)
+        self._video_player.set_stress_markers(
+            self._timeline_chart.get_stress_marker_timestamps_ms()
+        )
 
         # ── Video Recording ────────────────────────────────────────────
         video_path = self._session_repo.get_video_path(session_id)
@@ -245,6 +250,31 @@ class PostSessionView(QWidget):
         video_area = self._build_video_area()
         video_area.setMinimumHeight(520) # Large playback area
         content_layout.addWidget(video_area)
+
+        self._delete_session_btn = QPushButton("Delete Session")
+        self._delete_session_btn.setObjectName("secondary")
+        self._delete_session_btn.setIcon(get_icon("ph.trash", color=COLOR_DANGER))
+        self._delete_session_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
+        self._delete_session_btn.setFixedHeight(FONT_HEADING_2 * 2)
+        self._delete_session_btn.setMinimumWidth(190)
+        self._delete_session_btn.setStyleSheet(
+            f"""
+            QPushButton#secondary {{
+                background-color: {COLOR_CARD};
+                color: {COLOR_DANGER};
+                border: 1px solid {COLOR_DANGER};
+                border-radius: {FONT_HEADING_2}px;
+                padding: 0px {SPACE_2}px;
+                font-size: {FONT_BODY}px;
+                font-weight: 600;
+            }}
+            QPushButton#secondary:hover {{
+                background-color: {COLOR_DANGER_BG};
+            }}
+            """
+        )
+        self._delete_session_btn.clicked.connect(self._on_delete_clicked)
+        content_layout.addWidget(self._delete_session_btn, alignment=Qt.AlignmentFlag.AlignLeft)
 
         content_layout.addStretch(1)
         
@@ -336,15 +366,6 @@ class PostSessionView(QWidget):
             """
         )
 
-        self._start_session_btn = QPushButton("Start Session")
-        self._start_session_btn.setIcon(get_icon("ph.play-fill", color="#FFFFFF"))
-        self._start_session_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
-        self._start_session_btn.setFixedHeight(FONT_HEADING_2 * 2)
-        self._start_session_btn.setMinimumWidth(170)
-        self._start_session_btn.setStyleSheet(primary_action_button_stylesheet)
-        self._start_session_btn.clicked.connect(self.new_session_requested.emit)
-        header.addWidget(self._start_session_btn)
-
         self._export_btn = QPushButton("Export Data ")
         self._export_btn.setObjectName("secondary")
         self._export_btn.setIcon(get_icon("ph.arrow-right", color=COLOR_PRIMARY))
@@ -355,6 +376,15 @@ class PostSessionView(QWidget):
         self._export_btn.setStyleSheet(ghost_action_button_stylesheet)
         self._export_btn.clicked.connect(self._on_export_clicked)
         header.addWidget(self._export_btn)
+
+        self._start_session_btn = QPushButton("Start Session")
+        self._start_session_btn.setIcon(get_icon("ph.play-fill", color="#FFFFFF"))
+        self._start_session_btn.setIconSize(QSize(FONT_BODY + 2, FONT_BODY + 2))
+        self._start_session_btn.setFixedHeight(FONT_HEADING_2 * 2)
+        self._start_session_btn.setMinimumWidth(170)
+        self._start_session_btn.setStyleSheet(primary_action_button_stylesheet)
+        self._start_session_btn.clicked.connect(self.new_session_requested.emit)
+        header.addWidget(self._start_session_btn)
 
         return header
 
@@ -514,3 +544,23 @@ class PostSessionView(QWidget):
     def _build_video_area(self) -> QWidget:
         """Return the video player widget."""
         return self._video_player
+
+    def _on_delete_clicked(self) -> None:
+        """Delete the current session after user confirmation."""
+        if self._session_id is None:
+            return
+
+        result = QMessageBox.question(
+            self,
+            "Delete Session",
+            "Delete this session and all associated measurements?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+
+        session_id = self._session_id
+        self._session_repo.delete_session(session_id)
+        self.session_deleted.emit(session_id)
+        self.back_to_dashboard.emit()
